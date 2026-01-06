@@ -1,15 +1,24 @@
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use futures::StreamExt;
 use anyhow::{Result, anyhow};
-use crate::models::CrawlResult;
+use crate::models::{CrawlResult, MediaItem, Link};
 use crate::markdown::DefaultMarkdownGenerator;
+use crate::content_filter::PruningContentFilter;
 use std::env;
 use std::path::Path;
+use std::collections::HashMap;
+use serde::Deserialize;
 
 #[derive(Default)]
 pub struct AsyncWebCrawler {
     browser: Option<Browser>,
     handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[derive(Deserialize)]
+struct ExtractionResult {
+    media: HashMap<String, Vec<MediaItem>>,
+    links: HashMap<String, Vec<Link>>,
 }
 
 impl AsyncWebCrawler {
@@ -31,16 +40,19 @@ impl AsyncWebCrawler {
         if let Ok(path) = env::var("CHROME_EXECUTABLE") {
             builder = builder.chrome_executable(Path::new(&path));
         } else {
-             // Fallback for this specific environment if auto-detect fails
-             // In a real library, we might want to rely on chromiumoxide's auto-detect,
-             // but for this sandbox, we know where it is.
-             // We'll leave it to auto-detect if env var is not set,
-             // but if auto-detect fails in this env, users should set the env var.
-             // However, to pass the test in this env without setting env var explicitly in the test code (which modifies global state),
-             // we can check if the known path exists and use it if so.
-             let known_path = Path::new("/usr/bin/google-chrome-stable");
-             if known_path.exists() {
-                 builder = builder.chrome_executable(known_path);
+             // Fallback: check for chromium as well since it's common in linux envs
+             let known_paths = [
+                 "/usr/bin/google-chrome-stable",
+                 "/usr/bin/chromium",
+                 "/usr/bin/chromium-browser"
+             ];
+
+             for path_str in known_paths {
+                 let path = Path::new(path_str);
+                 if path.exists() {
+                     builder = builder.chrome_executable(path);
+                     break;
+                 }
              }
         }
 
@@ -77,19 +89,91 @@ impl AsyncWebCrawler {
         page.wait_for_navigation().await?;
         let html = page.content().await?;
 
+        // Extract media and links using JavaScript
+        let script = r#"
+            (() => {
+                const resolveUrl = (url) => {
+                    try {
+                        return new URL(url, document.baseURI).href;
+                    } catch (e) {
+                        return url;
+                    }
+                };
+
+                const media = {};
+                const images = Array.from(document.images).map(img => ({
+                    src: resolveUrl(img.src),
+                    alt: img.alt || null,
+                    desc: img.title || null,
+                    score: null,
+                    type: "image",
+                    group_id: null
+                }));
+                media["images"] = images;
+
+                const links = { internal: [], external: [] };
+                const domain = window.location.hostname;
+
+                Array.from(document.links).forEach(link => {
+                    const href = resolveUrl(link.href);
+                    const linkObj = {
+                        href: href,
+                        text: link.innerText || null,
+                        title: link.title || null
+                    };
+
+                    try {
+                        const linkUrl = new URL(href);
+                        // For data URLs, hostname is empty string, so everything usually counts as external
+                        // unless we handle it specifically.
+                        if (linkUrl.hostname && linkUrl.hostname === domain) {
+                            links.internal.push(linkObj);
+                        } else {
+                            links.external.push(linkObj);
+                        }
+                    } catch (e) {
+                        links.external.push(linkObj);
+                    }
+                });
+
+                return { media, links };
+            })()
+        "#;
+
+        let extraction: Option<ExtractionResult> = match page.evaluate(script).await {
+            Ok(val) => match val.into_value() {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    eprintln!("Failed to deserialize extraction result: {:?}", e);
+                    None
+                }
+            },
+            Err(e) => {
+                eprintln!("Failed to evaluate extraction script: {:?}", e);
+                None
+            }
+        };
+
         page.close().await?;
 
         // Generate Markdown
-        let generator = DefaultMarkdownGenerator::new();
+        let content_filter = PruningContentFilter::default();
+        let generator = DefaultMarkdownGenerator::new(Some(content_filter));
         let markdown_result = generator.generate_markdown(&html);
+
+        let (media, links) = if let Some(ext) = extraction {
+            (Some(ext.media), Some(ext.links))
+        } else {
+            (None, None)
+        };
 
         Ok(CrawlResult {
             url: url.to_string(),
             html,
             success: true,
             cleaned_html: None,
-            media: None,
-            links: None,
+            media,
+            links,
             screenshot: None,
             markdown: Some(markdown_result),
             extracted_content: None,

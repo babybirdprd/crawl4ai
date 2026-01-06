@@ -39,6 +39,7 @@ pub struct MediaItem {
     pub alt: Option<String>,
     pub desc: Option<String>,
     pub score: Option<i32>,
+    #[serde(rename = "type")]
     pub type_: String, // "type" is a reserved keyword in Rust
     pub group_id: Option<i32>,
 }
