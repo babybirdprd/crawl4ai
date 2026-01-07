@@ -3,12 +3,13 @@ use chromiumoxide::cdp::browser_protocol::target::{CreateBrowserContextParams, C
 use chromiumoxide::cdp::browser_protocol::browser::BrowserContextId;
 use futures::StreamExt;
 use anyhow::{Result, anyhow};
-use crate::models::{CrawlResult, MediaItem, Link, CrawlerRunConfig};
+use crate::models::{CrawlResult, MediaItem, Link, CrawlerRunConfig, WaitStrategy};
 use crate::markdown::DefaultMarkdownGenerator;
 use crate::content_filter::PruningContentFilter;
 use std::env;
 use std::path::Path;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 #[derive(Default)]
@@ -63,6 +64,8 @@ impl AsyncWebCrawler {
         let config = builder
             .arg("--no-sandbox")
             .arg("--disable-dev-shm-usage")
+            .arg("--disable-gpu")
+            .arg("--disable-setuid-sandbox")
             .build()
             .map_err(|e| anyhow!(e))?;
 
@@ -70,10 +73,12 @@ impl AsyncWebCrawler {
 
         let handle = tokio::task::spawn(async move {
             while let Some(h) = handler.next().await {
-                if h.is_err() {
-                    break;
+                if let Err(e) = h {
+                    eprintln!("Browser handler error: {:?}", e);
+                    continue;
                 }
             }
+            eprintln!("Browser handler loop exited");
         });
 
         self.browser = Some(browser);
@@ -114,6 +119,54 @@ impl AsyncWebCrawler {
         };
 
         page.wait_for_navigation().await?;
+
+        if let Some(ref cfg) = config {
+            if let Some(ref strategy) = cfg.wait_for {
+                match strategy {
+                    WaitStrategy::Fixed(ms) => {
+                        tokio::time::sleep(Duration::from_millis(*ms)).await;
+                    },
+                    WaitStrategy::Selector(selector) => {
+                        let timeout = Duration::from_secs(10);
+                        let start = Instant::now();
+                        loop {
+                            if start.elapsed() > timeout {
+                                eprintln!("Timeout waiting for selector: {}", selector);
+                                break;
+                            }
+                            match page.find_element(selector).await {
+                                Ok(_) => break,
+                                Err(_) => {
+                                    tokio::time::sleep(Duration::from_millis(500)).await;
+                                }
+                            }
+                        }
+                    },
+                    WaitStrategy::JsCondition(js) => {
+                         let timeout = Duration::from_secs(10);
+                         let start = Instant::now();
+                         loop {
+                            if start.elapsed() > timeout {
+                                eprintln!("Timeout waiting for js condition");
+                                break;
+                            }
+                            match page.evaluate(js.as_str()).await {
+                                Ok(val) => {
+                                    if let Ok(bool_val) = val.into_value::<bool>() {
+                                        if bool_val {
+                                            break;
+                                        }
+                                    }
+                                },
+                                Err(_) => {}
+                            }
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                         }
+                    }
+                }
+            }
+        }
+
         let html = page.content().await?;
 
         // Extract media and links using JavaScript
