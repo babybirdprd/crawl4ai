@@ -1,9 +1,14 @@
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::target::{CreateBrowserContextParams, CreateTargetParams};
 use chromiumoxide::cdp::browser_protocol::browser::BrowserContextId;
+use chromiumoxide::cdp::browser_protocol::page::CaptureSnapshotFormat;
+use chromiumoxide::cdp::browser_protocol::page::CaptureSnapshotParams;
+use chromiumoxide::cdp::browser_protocol::network::{EventRequestWillBeSent, EventResponseReceived, EventLoadingFailed};
+use chromiumoxide::cdp::js_protocol::runtime::EventConsoleApiCalled;
 use futures::StreamExt;
 use anyhow::{Result, anyhow};
-use crate::models::{CrawlResult, MediaItem, Link, CrawlerRunConfig, WaitStrategy};
+use crate::models::{CrawlResult, MediaItem, Link, CrawlerRunConfig, WaitStrategy, NetworkRequest, ConsoleMessage, ContentSource};
+use std::sync::{Arc, Mutex};
 use crate::markdown::DefaultMarkdownGenerator;
 use crate::content_filter::{PruningContentFilter, ContentFilter};
 use std::env;
@@ -185,8 +190,109 @@ impl AsyncWebCrawler {
                         .map_err(|e| anyhow!(e))?;
                     browser.new_page(params).await?
                 } else {
-                    browser.new_page(url).await?
+                    // Create page first, but don't navigate yet?
+                    // chromiumoxide::Browser::new_page navigates immediately.
+                    // We need to set listeners BEFORE navigation to capture initial requests.
+                    // But `new_page` returns a page that is already navigating or navigated?
+                    // Docs say: "Triggers a navigation to the search result page" in example.
+                    // Actually `new_page(url)` calls `CreateTarget` with url.
+
+                    // If we want to capture everything, we should create a blank page, setup listeners, then navigate.
+
+                    // However, `new_page` is convenient.
+                    // Let's try to create a blank page first if we need to capture.
+
+                    if config.as_ref().map(|c| c.capture_network_requests.unwrap_or(false) || c.capture_console_messages.unwrap_or(false)).unwrap_or(false) {
+                         let page = browser.new_page("about:blank").await?;
+                         // Return page here? No, we need to assign it to `page` variable but we are in if/else.
+                         page
+                    } else {
+                         browser.new_page(url).await?
+                    }
                 };
+
+                // Note: If we created about:blank, we need to navigate later.
+
+                // Setup listeners for network and console capture
+                let capture_network = config.as_ref().map(|c| c.capture_network_requests.unwrap_or(false)).unwrap_or(false);
+                let capture_console = config.as_ref().map(|c| c.capture_console_messages.unwrap_or(false)).unwrap_or(false);
+
+                let network_requests: Arc<Mutex<Vec<NetworkRequest>>> = Arc::new(Mutex::new(Vec::new()));
+                let console_messages: Arc<Mutex<Vec<ConsoleMessage>>> = Arc::new(Mutex::new(Vec::new()));
+
+                let _network_listener_handle;
+                let _console_listener_handle;
+
+                if capture_network {
+                    // Enable Network domain
+                    if let Err(e) = page.execute(chromiumoxide::cdp::browser_protocol::network::EnableParams::default()).await {
+                        eprintln!("Failed to enable network: {:?}", e);
+                    }
+
+                    let requests = network_requests.clone();
+                    let mut request_events = page.event_listener::<EventRequestWillBeSent>().await?;
+
+                    _network_listener_handle = Some(tokio::spawn(async move {
+                         while let Some(event) = request_events.next().await {
+                             // eprintln!("Network event: {:?}", event.request.url);
+                             let mut reqs = requests.lock().unwrap();
+                             reqs.push(NetworkRequest {
+                                 url: event.request.url.clone(),
+                                 method: event.request.method.clone(),
+                                 headers: Some(serde_json::from_value::<HashMap<String, String>>(serde_json::to_value(event.request.headers.clone()).unwrap()).unwrap_or_default()),
+                                 response_status: None, // Filled later if we could match response
+                                 response_headers: None,
+                                 request_body: event.request.post_data.clone(),
+                                 response_body: None,
+                             });
+                         }
+                    }));
+                } else {
+                    _network_listener_handle = None;
+                }
+
+                if capture_console {
+                     // Enable Runtime domain for console
+                     if let Err(e) = page.enable_runtime().await {
+                         eprintln!("Failed to enable runtime: {:?}", e);
+                     }
+
+                     let messages = console_messages.clone();
+                     let mut console_events = page.event_listener::<EventConsoleApiCalled>().await?;
+                     _console_listener_handle = Some(tokio::spawn(async move {
+                         while let Some(event) = console_events.next().await {
+                             let mut msgs = messages.lock().unwrap();
+                             let text = event.args.iter()
+                                .map(|arg| arg.value.as_ref().map(|v| v.to_string()).unwrap_or_default())
+                                .collect::<Vec<_>>()
+                                .join(" ");
+
+                             msgs.push(ConsoleMessage {
+                                 type_: format!("{:?}", event.r#type),
+                                 text,
+                                 source: None,
+                                 line: None,
+                                 column: None,
+                                 url: None,
+                             });
+                         }
+                     }));
+                } else {
+                    _console_listener_handle = None;
+                }
+
+                // If we started with about:blank (implied by capture flags), we need to navigate now.
+                // Or if we just did new_page(url), we are already navigating.
+                // But wait, if we did new_page(url), the navigation might have already happened or started.
+                // Capturing after new_page(url) will miss initial requests.
+
+                // So the logic above:
+                // 1. If capture enabled -> new_page("about:blank") -> setup listeners -> goto(url)
+                // 2. If capture disabled -> new_page(url) -> wait_for_navigation
+
+                if capture_network || capture_console {
+                    page.goto(url).await?;
+                }
 
                 page.wait_for_navigation().await?;
 
@@ -302,6 +408,25 @@ impl AsyncWebCrawler {
                     }
                 };
 
+                let mhtml = if let Some(ref cfg) = config {
+                    if cfg.capture_mhtml.unwrap_or(false) {
+                        let params = CaptureSnapshotParams::builder()
+                            .format(CaptureSnapshotFormat::Mhtml)
+                            .build();
+                        match page.execute(params).await {
+                            Ok(res) => Some(res.data.clone()),
+                            Err(e) => {
+                                eprintln!("Failed to capture MHTML: {:?}", e);
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 page.close().await?;
 
                 // Generate Markdown
@@ -311,8 +436,41 @@ impl AsyncWebCrawler {
                     ContentFilter::Pruning(PruningContentFilter::default())
                 };
 
-                let generator = DefaultMarkdownGenerator::new(Some(content_filter));
-                let markdown_result = generator.generate_markdown(&html);
+                let generator = DefaultMarkdownGenerator::new(Some(content_filter.clone()));
+
+                // Determine which HTML to use for markdown generation
+                let source_html = if let Some(ref cfg) = config {
+                    match cfg.content_source {
+                        Some(ContentSource::RawHtml) => &html,
+                        Some(ContentSource::CleanedHtml) | None => {
+                            // Logic for cleaned HTML is handled by the generator filtering,
+                            // but if we want to explicitly use the "filtered" output as input,
+                            // we might need to filter first.
+                            // Currently DefaultMarkdownGenerator takes the full HTML and filters internally using content_filter.
+                            // So passing &html is correct for "CleanedHtml" strategy if generator does the cleaning.
+                            &html
+                        },
+                    }
+                } else {
+                    &html
+                };
+
+                // Note: content_filter is already passed to generator.
+                // If content_source is RawHtml, we might want to DISABLE content filtering in generator?
+                // Or does RawHtml just mean "use raw html as base" but still apply pruning if configured?
+                // Usually "RawHtml" implies "Full content converted to markdown without pruning".
+
+                let markdown_result = if let Some(ref cfg) = config {
+                    if matches!(cfg.content_source, Some(ContentSource::RawHtml)) {
+                        // Create a generator without filter for RawHtml
+                         DefaultMarkdownGenerator::new(None).generate_markdown(source_html)
+                    } else {
+                        generator.generate_markdown(source_html)
+                    }
+                } else {
+                    generator.generate_markdown(source_html)
+                };
+
 
                 let (media, links) = if let Some(ext) = extraction {
                     (Some(ext.media), Some(ext.links))
@@ -320,13 +478,33 @@ impl AsyncWebCrawler {
                     (None, None)
                 };
 
+                // Collect captured data
+                let captured_requests = if capture_network {
+                    Some(network_requests.lock().unwrap().clone())
+                } else {
+                    None
+                };
+
+                let captured_console = if capture_console {
+                    Some(console_messages.lock().unwrap().clone())
+                } else {
+                    None
+                };
+
+                // Abort listeners (dropping handles should suffice if we want to stop background tasks,
+                // but strictly speaking they might run until channel closed.
+                // Since page is closing, channel closes, so tasks finish.)
+
                 Ok(CrawlResult {
                     url: url.to_string(),
                     html,
                     success: true,
                     cleaned_html: None,
+                    mhtml,
                     media,
                     links,
+                    network_requests: captured_requests,
+                    console_messages: captured_console,
                     screenshot: None,
                     markdown: Some(markdown_result),
                     extracted_content: None,

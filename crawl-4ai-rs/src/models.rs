@@ -10,11 +10,23 @@ pub enum WaitStrategy {
     JsCondition(String),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ContentSource {
+    #[serde(rename = "raw_html")]
+    RawHtml,
+    #[serde(rename = "cleaned_html")]
+    CleanedHtml,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CrawlerRunConfig {
     pub session_id: Option<String>,
     pub wait_for: Option<WaitStrategy>,
     pub content_filter: Option<ContentFilter>,
+    pub capture_mhtml: Option<bool>,
+    pub capture_network_requests: Option<bool>,
+    pub capture_console_messages: Option<bool>,
+    pub content_source: Option<ContentSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -25,7 +37,13 @@ pub struct CrawlResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cleaned_html: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub mhtml: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub media: Option<HashMap<String, Vec<MediaItem>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_requests: Option<Vec<NetworkRequest>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub console_messages: Option<Vec<ConsoleMessage>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub links: Option<HashMap<String, Vec<Link>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,4 +83,26 @@ pub struct Link {
     pub href: Option<String>,
     pub text: Option<String>,
     pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkRequest {
+    pub url: String,
+    pub method: String,
+    pub headers: Option<HashMap<String, String>>,
+    pub response_status: Option<i32>,
+    pub response_headers: Option<HashMap<String, String>>,
+    pub request_body: Option<String>,
+    pub response_body: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsoleMessage {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub text: String,
+    pub source: Option<String>,
+    pub line: Option<i32>,
+    pub column: Option<i32>,
+    pub url: Option<String>,
 }
