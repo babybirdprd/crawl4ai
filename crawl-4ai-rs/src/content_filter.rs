@@ -386,7 +386,7 @@ impl BM25ContentFilter {
                              // Flush text for PREVIOUS block
                              if !current_text.is_empty() {
                                  if let Some((prev_tag, prev_node)) = block_stack.last() {
-                                     self.flush_chunk(&mut chunks, &mut index, &mut current_text, prev_tag, prev_node);
+                                     self.flush_chunk(&mut chunks, &mut index, &mut current_text, prev_tag, prev_node, &inline_tags);
                                  }
                              }
                              block_stack.push((tag_name, node.clone()));
@@ -406,7 +406,7 @@ impl BM25ContentFilter {
                              // Flush text for THIS block
                              if !current_text.is_empty() {
                                   if let Some((stack_tag, stack_node)) = block_stack.last() {
-                                     self.flush_chunk(&mut chunks, &mut index, &mut current_text, stack_tag, stack_node);
+                                     self.flush_chunk(&mut chunks, &mut index, &mut current_text, stack_tag, stack_node, &inline_tags);
                                  }
                              }
                              block_stack.pop();
@@ -419,14 +419,33 @@ impl BM25ContentFilter {
         chunks
     }
 
-    fn flush_chunk(&self, chunks: &mut Vec<(usize, String, String, NodeRef)>, index: &mut usize, current_text: &mut Vec<String>, tag_name: &str, node: &NodeRef) {
+    fn flush_chunk(&self, chunks: &mut Vec<(usize, String, String, NodeRef)>, index: &mut usize, current_text: &mut Vec<String>, tag_name: &str, node: &NodeRef, inline_tags: &HashSet<&str>) {
         let text = current_text.join(" ");
         let text = text.trim();
         if !text.is_empty() {
             let word_count = text.split_whitespace().count();
             let min_words = self.min_word_threshold.unwrap_or(1);
             if word_count >= min_words {
-                 chunks.push((*index, text.to_string(), tag_name.to_string(), node.clone()));
+                 // Check if node has block children
+                 let mut has_block_children = false;
+                 for child in node.children() {
+                     if let Some(elem) = child.as_element() {
+                         let child_tag = elem.name.local.to_string();
+                         if !inline_tags.contains(child_tag.as_str()) {
+                             has_block_children = true;
+                             break;
+                         }
+                     }
+                 }
+
+                 let chunk_node = if has_block_children {
+                     // Create a text node to represent this chunk, avoiding duplication of children
+                     NodeRef::new_text(text)
+                 } else {
+                     node.clone()
+                 };
+
+                 chunks.push((*index, text.to_string(), tag_name.to_string(), chunk_node));
                  *index += 1;
             }
         }

@@ -88,11 +88,47 @@ impl AsyncWebCrawler {
     }
 
     pub async fn arun(&mut self, url: &str, config: Option<CrawlerRunConfig>) -> Result<CrawlResult> {
-        if self.browser.is_none() {
-            self.start().await?;
-        }
+        let mut attempts = 0;
+        let max_attempts = 3;
 
-        let browser = self.browser.as_ref().unwrap();
+        loop {
+            attempts += 1;
+
+            if self.browser.is_none() {
+                if let Err(e) = self.start().await {
+                    if attempts >= max_attempts {
+                        return Err(e);
+                    }
+                    eprintln!("Failed to start browser (attempt {}): {}", attempts, e);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            }
+
+            match self.perform_crawl(url, &config).await {
+                Ok(res) => return Ok(res),
+                Err(e) => {
+                    eprintln!("Crawl error (attempt {}): {}", attempts, e);
+                    if attempts >= max_attempts {
+                        return Err(e);
+                    }
+
+                    // Check if we should restart browser
+                    let err_str = e.to_string().to_lowercase();
+                    if err_str.contains("channel closed") || err_str.contains("transport") || err_str.contains("connection refused") || err_str.contains("restart") {
+                        eprintln!("Restarting browser...");
+                        self.browser = None;
+                        self.sessions.clear();
+                    }
+
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+
+    async fn perform_crawl(&mut self, url: &str, config: &Option<CrawlerRunConfig>) -> Result<CrawlResult> {
+        let browser = self.browser.as_ref().ok_or_else(|| anyhow!("Browser not initialized"))?;
 
         let page = if let Some(ref cfg) = config {
             if let Some(ref session_id) = cfg.session_id {
@@ -204,8 +240,6 @@ impl AsyncWebCrawler {
 
                     try {
                         const linkUrl = new URL(href);
-                        // For data URLs, hostname is empty string, so everything usually counts as external
-                        // unless we handle it specifically.
                         if (linkUrl.hostname && linkUrl.hostname === domain) {
                             links.internal.push(linkObj);
                         } else {
@@ -234,10 +268,6 @@ impl AsyncWebCrawler {
             }
         };
 
-        // If a session ID is used, we might want to keep the page or context open.
-        // For now, we close the page, but the context persists in self.sessions.
-        // The user requirement says "reusing browser contexts/sessions".
-        // Typically sessions persist cookies/storage. Closing the page doesn't destroy the context.
         page.close().await?;
 
         // Generate Markdown
