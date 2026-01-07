@@ -1,9 +1,9 @@
 use crate::models::MarkdownGenerationResult;
-use crate::content_filter::PruningContentFilter;
+use crate::content_filter::{ContentFilter, PruningContentFilter};
 use html2text::from_read;
 
 pub struct DefaultMarkdownGenerator {
-    content_filter: Option<PruningContentFilter>,
+    content_filter: Option<ContentFilter>,
 }
 
 impl Default for DefaultMarkdownGenerator {
@@ -13,7 +13,7 @@ impl Default for DefaultMarkdownGenerator {
 }
 
 impl DefaultMarkdownGenerator {
-    pub fn new(content_filter: Option<PruningContentFilter>) -> Self {
+    pub fn new(content_filter: Option<ContentFilter>) -> Self {
         Self { content_filter }
     }
 

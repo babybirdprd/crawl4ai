@@ -5,7 +5,7 @@ use futures::StreamExt;
 use anyhow::{Result, anyhow};
 use crate::models::{CrawlResult, MediaItem, Link, CrawlerRunConfig, WaitStrategy};
 use crate::markdown::DefaultMarkdownGenerator;
-use crate::content_filter::PruningContentFilter;
+use crate::content_filter::{PruningContentFilter, ContentFilter};
 use std::env;
 use std::path::Path;
 use std::collections::HashMap;
@@ -241,7 +241,12 @@ impl AsyncWebCrawler {
         page.close().await?;
 
         // Generate Markdown
-        let content_filter = PruningContentFilter::default();
+        let content_filter = if let Some(ref cfg) = config {
+            cfg.content_filter.clone().unwrap_or(ContentFilter::Pruning(PruningContentFilter::default()))
+        } else {
+            ContentFilter::Pruning(PruningContentFilter::default())
+        };
+
         let generator = DefaultMarkdownGenerator::new(Some(content_filter));
         let markdown_result = generator.generate_markdown(&html);
 
