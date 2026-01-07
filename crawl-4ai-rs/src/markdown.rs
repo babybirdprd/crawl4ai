@@ -1,5 +1,5 @@
 use crate::models::MarkdownGenerationResult;
-use crate::content_filter::{ContentFilter, PruningContentFilter};
+use crate::content_filter::ContentFilter;
 use html2text::from_read;
 
 pub struct DefaultMarkdownGenerator {
