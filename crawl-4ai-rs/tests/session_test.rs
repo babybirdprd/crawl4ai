@@ -9,6 +9,7 @@ async fn test_session_reuse() {
 
     let config = CrawlerRunConfig {
         session_id: Some(session_id.clone()),
+        ..Default::default()
     };
 
     // First request with session ID

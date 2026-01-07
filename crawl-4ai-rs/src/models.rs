@@ -1,10 +1,18 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value")]
+pub enum WaitStrategy {
+    Fixed(u64), // Milliseconds
+    Selector(String),
+    JsCondition(String),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CrawlerRunConfig {
     pub session_id: Option<String>,
-    // We can add other configuration options here as we implement them
+    pub wait_for: Option<WaitStrategy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
