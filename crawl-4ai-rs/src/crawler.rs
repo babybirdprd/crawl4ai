@@ -11,6 +11,21 @@ use std::path::Path;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use serde::Deserialize;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum CrawlerError {
+    #[error("Browser error: {0}")]
+    BrowserError(String),
+    #[error("Navigation error: {0}")]
+    NavigationError(String),
+    #[error("Timeout waiting for {0}")]
+    Timeout(String),
+    #[error("Extraction error: {0}")]
+    ExtractionError(String),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
 
 #[derive(Default)]
 pub struct AsyncWebCrawler {
@@ -36,7 +51,17 @@ impl AsyncWebCrawler {
 
     pub async fn start(&mut self) -> Result<()> {
         if self.browser.is_some() {
-            return Ok(());
+            // Check if the handler is still running
+            if let Some(h) = &self.handle {
+                if !h.is_finished() {
+                    return Ok(());
+                }
+            }
+            // If finished, we need to restart, so clean up
+            self.browser = None;
+            self.handle = None;
+            // Also clean sessions as the browser context is gone
+            self.sessions.clear();
         }
 
         let mut builder = BrowserConfig::builder();
@@ -88,185 +113,250 @@ impl AsyncWebCrawler {
     }
 
     pub async fn arun(&mut self, url: &str, config: Option<CrawlerRunConfig>) -> Result<CrawlResult> {
-        if self.browser.is_none() {
-            self.start().await?;
-        }
+        let max_retries = 3;
+        let mut attempt = 0;
 
-        let browser = self.browser.as_ref().unwrap();
+        loop {
+            attempt += 1;
 
-        let page = if let Some(ref cfg) = config {
-            if let Some(ref session_id) = cfg.session_id {
-                let context_id = if let Some(id) = self.sessions.get(session_id) {
-                    id.clone()
-                } else {
-                    let id = browser.create_browser_context(CreateBrowserContextParams::default()).await?;
-                    self.sessions.insert(session_id.clone(), id.clone());
-                    id
-                };
-
-                let params = CreateTargetParams::builder()
-                    .url(url)
-                    .browser_context_id(context_id)
-                    .build()
-                    .map_err(|e| anyhow!(e))?;
-
-                browser.new_page(params).await?
-            } else {
-                browser.new_page(url).await?
-            }
-        } else {
-            browser.new_page(url).await?
-        };
-
-        page.wait_for_navigation().await?;
-
-        if let Some(ref cfg) = config {
-            if let Some(ref strategy) = cfg.wait_for {
-                match strategy {
-                    WaitStrategy::Fixed(ms) => {
-                        tokio::time::sleep(Duration::from_millis(*ms)).await;
-                    },
-                    WaitStrategy::Selector(selector) => {
-                        let timeout = Duration::from_secs(10);
-                        let start = Instant::now();
-                        loop {
-                            if start.elapsed() > timeout {
-                                eprintln!("Timeout waiting for selector: {}", selector);
-                                break;
-                            }
-                            match page.find_element(selector).await {
-                                Ok(_) => break,
-                                Err(_) => {
-                                    tokio::time::sleep(Duration::from_millis(500)).await;
-                                }
-                            }
-                        }
-                    },
-                    WaitStrategy::JsCondition(js) => {
-                         let timeout = Duration::from_secs(10);
-                         let start = Instant::now();
-                         loop {
-                            if start.elapsed() > timeout {
-                                eprintln!("Timeout waiting for js condition");
-                                break;
-                            }
-                            match page.evaluate(js.as_str()).await {
-                                Ok(val) => {
-                                    if let Ok(bool_val) = val.into_value::<bool>() {
-                                        if bool_val {
-                                            break;
-                                        }
-                                    }
-                                },
-                                Err(_) => {}
-                            }
-                            tokio::time::sleep(Duration::from_millis(500)).await;
-                         }
+            // 1. Ensure browser is running
+            if self.browser.is_none() || self.handle.as_ref().map(|h| h.is_finished()).unwrap_or(true) {
+                if let Err(e) = self.start().await {
+                    if attempt >= max_retries {
+                         return Err(CrawlerError::BrowserError(format!("Failed to start browser: {}", e)).into());
                     }
+                    eprintln!("Failed to start browser (attempt {}): {}", attempt, e);
+                    tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
+                    continue;
                 }
             }
-        }
 
-        let html = page.content().await?;
+            // 2. Clone browser handle and manage session
+            let browser = self.browser.as_ref().unwrap();
 
-        // Extract media and links using JavaScript
-        let script = r#"
-            (() => {
-                const resolveUrl = (url) => {
-                    try {
-                        return new URL(url, document.baseURI).href;
-                    } catch (e) {
-                        return url;
-                    }
-                };
-
-                const media = {};
-                const images = Array.from(document.images).map(img => ({
-                    src: resolveUrl(img.src),
-                    alt: img.alt || null,
-                    desc: img.title || null,
-                    score: null,
-                    type: "image",
-                    group_id: null
-                }));
-                media["images"] = images;
-
-                const links = { internal: [], external: [] };
-                const domain = window.location.hostname;
-
-                Array.from(document.links).forEach(link => {
-                    const href = resolveUrl(link.href);
-                    const linkObj = {
-                        href: href,
-                        text: link.innerText || null,
-                        title: link.title || null
-                    };
-
-                    try {
-                        const linkUrl = new URL(href);
-                        // For data URLs, hostname is empty string, so everything usually counts as external
-                        // unless we handle it specifically.
-                        if (linkUrl.hostname && linkUrl.hostname === domain) {
-                            links.internal.push(linkObj);
-                        } else {
-                            links.external.push(linkObj);
-                        }
-                    } catch (e) {
-                        links.external.push(linkObj);
-                    }
-                });
-
-                return { media, links };
-            })()
-        "#;
-
-        let extraction: Option<ExtractionResult> = match page.evaluate(script).await {
-            Ok(val) => match val.into_value() {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    eprintln!("Failed to deserialize extraction result: {:?}", e);
+            // Handle session creation here (using &mut self)
+            let context_id = if let Some(ref cfg) = config {
+                if let Some(ref session_id) = cfg.session_id {
+                     // Check if session exists
+                     if let Some(id) = self.sessions.get(session_id) {
+                         Some(id.clone())
+                     } else {
+                         // Create new session
+                         // Note: We use the cloned browser handle, so no conflict with &mut self
+                         match browser.create_browser_context(CreateBrowserContextParams::default()).await {
+                             Ok(id) => {
+                                 self.sessions.insert(session_id.clone(), id.clone());
+                                 Some(id)
+                             },
+                             Err(e) => {
+                                 // If session creation fails, it's a browser error
+                                 let err_str = e.to_string();
+                                 if attempt >= max_retries {
+                                     return Err(CrawlerError::BrowserError(format!("Failed to create session: {}", e)).into());
+                                 }
+                                 eprintln!("Failed to create session (attempt {}): {}", attempt, e);
+                                 // If connection failed, invalidate browser
+                                 if err_str.contains("oneshot canceled") || err_str.contains("channel closed") {
+                                     self.browser = None;
+                                 }
+                                 tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
+                                 continue;
+                             }
+                         }
+                     }
+                } else {
                     None
                 }
-            },
-            Err(e) => {
-                eprintln!("Failed to evaluate extraction script: {:?}", e);
+            } else {
                 None
+            };
+
+            // 3. Perform the crawl logic
+            // From this point on, we don't need &mut self anymore, we use `browser` and `context_id`.
+            // However, we are inside a loop that requires &mut self for the next iteration (start()).
+            // So we can call an async block or function.
+
+            let result: Result<CrawlResult> = async {
+                let page = if let Some(cid) = context_id {
+                    let params = CreateTargetParams::builder()
+                        .url(url)
+                        .browser_context_id(cid)
+                        .build()
+                        .map_err(|e| anyhow!(e))?;
+                    browser.new_page(params).await?
+                } else {
+                    browser.new_page(url).await?
+                };
+
+                page.wait_for_navigation().await?;
+
+                if let Some(ref cfg) = config {
+                    if let Some(ref strategy) = cfg.wait_for {
+                        match strategy {
+                            WaitStrategy::Fixed(ms) => {
+                                tokio::time::sleep(Duration::from_millis(*ms)).await;
+                            },
+                            WaitStrategy::Selector(selector) => {
+                                let timeout = Duration::from_secs(10);
+                                let start = Instant::now();
+                                loop {
+                                    if start.elapsed() > timeout {
+                                        eprintln!("Timeout waiting for selector: {}", selector);
+                                        break;
+                                    }
+                                    match page.find_element(selector).await {
+                                        Ok(_) => break,
+                                        Err(_) => {
+                                            tokio::time::sleep(Duration::from_millis(500)).await;
+                                        }
+                                    }
+                                }
+                            },
+                            WaitStrategy::JsCondition(js) => {
+                                 let timeout = Duration::from_secs(10);
+                                 let start = Instant::now();
+                                 loop {
+                                    if start.elapsed() > timeout {
+                                        eprintln!("Timeout waiting for js condition");
+                                        break;
+                                    }
+                                    match page.evaluate(js.as_str()).await {
+                                        Ok(val) => {
+                                            if let Ok(bool_val) = val.into_value::<bool>() {
+                                                if bool_val {
+                                                    break;
+                                                }
+                                            }
+                                        },
+                                        Err(_) => {}
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(500)).await;
+                                 }
+                            }
+                        }
+                    }
+                }
+
+                let html = page.content().await?;
+
+                // Extract media and links using JavaScript
+                let script = r#"
+                    (() => {
+                        const resolveUrl = (url) => {
+                            try {
+                                return new URL(url, document.baseURI).href;
+                            } catch (e) {
+                                return url;
+                            }
+                        };
+
+                        const media = {};
+                        const images = Array.from(document.images).map(img => ({
+                            src: resolveUrl(img.src),
+                            alt: img.alt || null,
+                            desc: img.title || null,
+                            score: null,
+                            type: "image",
+                            group_id: null
+                        }));
+                        media["images"] = images;
+
+                        const links = { internal: [], external: [] };
+                        const domain = window.location.hostname;
+
+                        Array.from(document.links).forEach(link => {
+                            const href = resolveUrl(link.href);
+                            const linkObj = {
+                                href: href,
+                                text: link.innerText || null,
+                                title: link.title || null
+                            };
+
+                            try {
+                                const linkUrl = new URL(href);
+                                if (linkUrl.hostname && linkUrl.hostname === domain) {
+                                    links.internal.push(linkObj);
+                                } else {
+                                    links.external.push(linkObj);
+                                }
+                            } catch (e) {
+                                links.external.push(linkObj);
+                            }
+                        });
+
+                        return { media, links };
+                    })()
+                "#;
+
+                let extraction: Option<ExtractionResult> = match page.evaluate(script).await {
+                    Ok(val) => match val.into_value() {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            eprintln!("Failed to deserialize extraction result: {:?}", e);
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("Failed to evaluate extraction script: {:?}", e);
+                        None
+                    }
+                };
+
+                page.close().await?;
+
+                // Generate Markdown
+                let content_filter = if let Some(ref cfg) = config {
+                    cfg.content_filter.clone().unwrap_or(ContentFilter::Pruning(PruningContentFilter::default()))
+                } else {
+                    ContentFilter::Pruning(PruningContentFilter::default())
+                };
+
+                let generator = DefaultMarkdownGenerator::new(Some(content_filter));
+                let markdown_result = generator.generate_markdown(&html);
+
+                let (media, links) = if let Some(ext) = extraction {
+                    (Some(ext.media), Some(ext.links))
+                } else {
+                    (None, None)
+                };
+
+                Ok(CrawlResult {
+                    url: url.to_string(),
+                    html,
+                    success: true,
+                    cleaned_html: None,
+                    media,
+                    links,
+                    screenshot: None,
+                    markdown: Some(markdown_result),
+                    extracted_content: None,
+                    error_message: None,
+                })
+            }.await;
+
+            match result {
+                Ok(res) => return Ok(res),
+                Err(e) => {
+                     let err_str = e.to_string();
+                     // Check if it's a fatal browser error
+                     let is_fatal = err_str.contains("oneshot canceled") || err_str.contains("channel closed") || err_str.contains("Broken pipe") || err_str.contains("Connection reset by peer");
+
+                     if is_fatal || attempt < max_retries {
+                         eprintln!("Crawl error (attempt {}/{}): {}", attempt, max_retries, err_str);
+                         if is_fatal {
+                             self.browser = None;
+                             // We should also probably clear sessions, as context IDs are invalid
+                             self.sessions.clear();
+                         }
+                         if attempt >= max_retries {
+                             return Err(e);
+                         }
+                         tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
+                         continue;
+                     }
+                     return Err(e);
+                }
             }
-        };
-
-        // If a session ID is used, we might want to keep the page or context open.
-        // For now, we close the page, but the context persists in self.sessions.
-        // The user requirement says "reusing browser contexts/sessions".
-        // Typically sessions persist cookies/storage. Closing the page doesn't destroy the context.
-        page.close().await?;
-
-        // Generate Markdown
-        let content_filter = if let Some(ref cfg) = config {
-            cfg.content_filter.clone().unwrap_or(ContentFilter::Pruning(PruningContentFilter::default()))
-        } else {
-            ContentFilter::Pruning(PruningContentFilter::default())
-        };
-
-        let generator = DefaultMarkdownGenerator::new(Some(content_filter));
-        let markdown_result = generator.generate_markdown(&html);
-
-        let (media, links) = if let Some(ext) = extraction {
-            (Some(ext.media), Some(ext.links))
-        } else {
-            (None, None)
-        };
-
-        Ok(CrawlResult {
-            url: url.to_string(),
-            html,
-            success: true,
-            cleaned_html: None,
-            media,
-            links,
-            screenshot: None,
-            markdown: Some(markdown_result),
-            extracted_content: None,
-            error_message: None,
-        })
+        }
     }
 }

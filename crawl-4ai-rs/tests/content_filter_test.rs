@@ -1,4 +1,4 @@
-use crawl_4ai_rs::content_filter::{BM25ContentFilter, ContentFilter};
+use crawl_4ai_rs::content_filter::BM25ContentFilter;
 
 #[cfg(test)]
 mod tests {
