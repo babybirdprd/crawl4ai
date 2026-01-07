@@ -2,6 +2,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CrawlerRunConfig {
+    pub session_id: Option<String>,
+    // We can add other configuration options here as we implement them
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CrawlResult {
     pub url: String,
     pub html: String,

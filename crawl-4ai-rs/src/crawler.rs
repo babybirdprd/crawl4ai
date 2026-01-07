@@ -1,7 +1,9 @@
 use chromiumoxide::browser::{Browser, BrowserConfig};
+use chromiumoxide::cdp::browser_protocol::target::{CreateBrowserContextParams, CreateTargetParams};
+use chromiumoxide::cdp::browser_protocol::browser::BrowserContextId;
 use futures::StreamExt;
 use anyhow::{Result, anyhow};
-use crate::models::{CrawlResult, MediaItem, Link};
+use crate::models::{CrawlResult, MediaItem, Link, CrawlerRunConfig};
 use crate::markdown::DefaultMarkdownGenerator;
 use crate::content_filter::PruningContentFilter;
 use std::env;
@@ -13,6 +15,7 @@ use serde::Deserialize;
 pub struct AsyncWebCrawler {
     browser: Option<Browser>,
     handle: Option<tokio::task::JoinHandle<()>>,
+    sessions: HashMap<String, BrowserContextId>,
 }
 
 #[derive(Deserialize)]
@@ -26,6 +29,7 @@ impl AsyncWebCrawler {
         Self {
             browser: None,
             handle: None,
+            sessions: HashMap::new(),
         }
     }
 
@@ -78,13 +82,36 @@ impl AsyncWebCrawler {
         Ok(())
     }
 
-    pub async fn arun(&mut self, url: &str) -> Result<CrawlResult> {
+    pub async fn arun(&mut self, url: &str, config: Option<CrawlerRunConfig>) -> Result<CrawlResult> {
         if self.browser.is_none() {
             self.start().await?;
         }
 
         let browser = self.browser.as_ref().unwrap();
-        let page = browser.new_page(url).await?;
+
+        let page = if let Some(ref cfg) = config {
+            if let Some(ref session_id) = cfg.session_id {
+                let context_id = if let Some(id) = self.sessions.get(session_id) {
+                    id.clone()
+                } else {
+                    let id = browser.create_browser_context(CreateBrowserContextParams::default()).await?;
+                    self.sessions.insert(session_id.clone(), id.clone());
+                    id
+                };
+
+                let params = CreateTargetParams::builder()
+                    .url(url)
+                    .browser_context_id(context_id)
+                    .build()
+                    .map_err(|e| anyhow!(e))?;
+
+                browser.new_page(params).await?
+            } else {
+                browser.new_page(url).await?
+            }
+        } else {
+            browser.new_page(url).await?
+        };
 
         page.wait_for_navigation().await?;
         let html = page.content().await?;
@@ -154,6 +181,10 @@ impl AsyncWebCrawler {
             }
         };
 
+        // If a session ID is used, we might want to keep the page or context open.
+        // For now, we close the page, but the context persists in self.sessions.
+        // The user requirement says "reusing browser contexts/sessions".
+        // Typically sessions persist cookies/storage. Closing the page doesn't destroy the context.
         page.close().await?;
 
         // Generate Markdown
