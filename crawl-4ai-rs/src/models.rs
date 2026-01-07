@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::content_filter::ContentFilter;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
@@ -13,6 +14,7 @@ pub enum WaitStrategy {
 pub struct CrawlerRunConfig {
     pub session_id: Option<String>,
     pub wait_for: Option<WaitStrategy>,
+    pub content_filter: Option<ContentFilter>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
