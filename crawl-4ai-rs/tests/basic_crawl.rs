@@ -10,7 +10,7 @@ async fn test_crawler_initialization() {
 async fn test_crawl_html() {
     let mut crawler = AsyncWebCrawler::new();
     let url = "https://example.com";
-    let result = crawler.arun(url).await;
+    let result = crawler.arun(url, None).await;
 
     match &result {
         Ok(r) => println!("Success: {}", r.url),
