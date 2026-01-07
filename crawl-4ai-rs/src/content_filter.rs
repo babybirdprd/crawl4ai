@@ -370,67 +370,68 @@ impl BM25ContentFilter {
         let mut chunks = Vec::new();
         let mut index = 0;
         let mut current_text = Vec::new();
-        let mut block_stack: Vec<(String, NodeRef)> = Vec::new();
 
         let inline_tags: HashSet<&str> = [
             "a", "abbr", "acronym", "b", "bdo", "big", "br", "button", "cite", "code", "dfn", "em", "i", "img", "input", "kbd", "label", "map", "object", "q", "samp", "script", "select", "small", "span", "strong", "sub", "sup", "textarea", "time", "tt", "var"
         ].iter().cloned().collect();
 
+        let header_tags: HashSet<&str> = ["h1", "h2", "h3", "h4", "h5", "h6", "header"].iter().cloned().collect();
+
         for edge in body.traverse() {
              match edge {
                  kuchiki::iter::NodeEdge::Start(node) => {
-                     if let Some(elem) = node.as_element() {
-                         let tag_name = elem.name.local.to_string();
-                         if !inline_tags.contains(tag_name.as_str()) {
-                             // Block element start
-                             // Flush text for PREVIOUS block
-                             if !current_text.is_empty() {
-                                 if let Some((prev_tag, prev_node)) = block_stack.last() {
-                                     self.flush_chunk(&mut chunks, &mut index, &mut current_text, prev_tag, prev_node);
-                                 }
-                             }
-                             block_stack.push((tag_name, node.clone()));
-                         }
-                     } else if let Some(text) = node.as_text() {
+                     if let Some(text) = node.as_text() {
                          let t = text.borrow();
                          if !t.trim().is_empty() {
-                             current_text.push(t.to_string());
+                             current_text.push(t.trim().to_string());
                          }
                      }
                  },
                  kuchiki::iter::NodeEdge::End(node) => {
                      if let Some(elem) = node.as_element() {
                          let tag_name = elem.name.local.to_string();
-                         if !inline_tags.contains(tag_name.as_str()) {
-                             // Block element end.
-                             // Flush text for THIS block
-                             if !current_text.is_empty() {
-                                  if let Some((stack_tag, stack_node)) = block_stack.last() {
-                                     self.flush_chunk(&mut chunks, &mut index, &mut current_text, stack_tag, stack_node);
-                                 }
+
+                         let is_inline = inline_tags.contains(tag_name.as_str());
+                         // Python: not (tag.name == "p" and len(current_text) == 0)
+                         let should_break = !is_inline && !(tag_name == "p" && current_text.is_empty());
+
+                         if should_break {
+                             let text = current_text.join(" ");
+                             let text = text.trim();
+
+                             if !text.is_empty() {
+                                 let tag_type = if header_tags.contains(tag_name.as_str()) {
+                                     "header".to_string()
+                                 } else {
+                                     "content".to_string()
+                                 };
+
+                                 chunks.push((index, text.to_string(), tag_type, node.clone()));
+                                 index += 1;
+                                 current_text.clear();
                              }
-                             block_stack.pop();
                          }
                      }
                  }
              }
         }
 
-        chunks
-    }
-
-    fn flush_chunk(&self, chunks: &mut Vec<(usize, String, String, NodeRef)>, index: &mut usize, current_text: &mut Vec<String>, tag_name: &str, node: &NodeRef) {
-        let text = current_text.join(" ");
-        let text = text.trim();
-        if !text.is_empty() {
-            let word_count = text.split_whitespace().count();
-            let min_words = self.min_word_threshold.unwrap_or(1);
-            if word_count >= min_words {
-                 chunks.push((*index, text.to_string(), tag_name.to_string(), node.clone()));
-                 *index += 1;
-            }
+        // Handle remaining text
+        if !current_text.is_empty() {
+             let text = current_text.join(" ");
+             let text = text.trim();
+             if !text.is_empty() {
+                 chunks.push((index, text.to_string(), "content".to_string(), body.clone()));
+             }
         }
-        current_text.clear();
+
+         if let Some(min_words) = self.min_word_threshold {
+            chunks.retain(|(_, text, _, _)| {
+                text.split_whitespace().count() >= min_words
+            });
+         }
+
+        chunks
     }
 
     fn calculate_bm25(&self, corpus: &[Vec<String>], query: &[String]) -> Vec<f32> {
@@ -461,5 +462,75 @@ impl BM25ContentFilter {
         }
 
         scores
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_text_chunks_nested() {
+        let html = r#"
+            <div>
+                Text1
+                <p>Text2</p>
+                Text3
+            </div>
+        "#;
+        let document = kuchiki::parse_html().one(html);
+        let body = document.select_first("body").unwrap();
+
+        let filter = BM25ContentFilter::default();
+        let chunks = filter.extract_text_chunks(body.as_node());
+
+        // Expected behavior matching Python:
+        // Chunk 1: "Text1 Text2" (Tag: p)
+        // Chunk 2: "Text3" (Tag: div) - assuming body itself is not the parent directly but div is.
+        // Wait, body contains div.
+        // Traverse:
+        // body start
+        // div start
+        // Text1 -> current=[Text1]
+        // p start
+        // Text2 -> current=[Text1, Text2]
+        // p end -> flush "Text1 Text2" (p)
+        // Text3 -> current=[Text3]
+        // div end -> flush "Text3" (div)
+        // body end -> current=[]
+
+        // Note: The HTML parser puts everything in body.
+        // The div is the child of body.
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].1, "Text1 Text2");
+        assert_eq!(chunks[0].2, "content"); // p is content
+
+        assert_eq!(chunks[1].1, "Text3");
+        assert_eq!(chunks[1].2, "content"); // div is content
+    }
+
+    #[test]
+    fn test_extract_text_chunks_inline() {
+        let html = r#"
+            <p>Start <span>Middle</span> End</p>
+        "#;
+        let document = kuchiki::parse_html().one(html);
+        let body = document.select_first("body").unwrap();
+
+        let filter = BM25ContentFilter::default();
+        let chunks = filter.extract_text_chunks(body.as_node());
+
+        // Traverse:
+        // p start
+        // Start -> current=[Start]
+        // span start
+        // Middle -> current=[Start, Middle]
+        // span end (inline -> no break)
+        // End -> current=[Start, Middle, End]
+        // p end (break) -> flush "Start Middle End"
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].1, "Start Middle End");
     }
 }
