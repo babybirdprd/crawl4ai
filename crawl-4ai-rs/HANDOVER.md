@@ -62,10 +62,9 @@
 
 ## Next Steps for the Next Agent
 1.  **Error Handling**: Enhance error mapping and retries. The "oneshot canceled" error from `chromiumoxide` can still happen if the browser crashes or disconnects. Robust retry logic and clearer error messages are needed.
-2.  **Docker Support**: Add a Dockerfile for easy deployment.
-3.  **Refine Text Chunk Extraction**: The current `extract_text_chunks` implementation in `BM25ContentFilter` works but could be optimized to better handle nested block elements and spacing, matching Python's `deque` based approach more closely if edge cases arise.
-4.  **Full Feature Parity**: Continue porting features from Python (e.g., specific extraction strategies, proxies, more detailed config options).
-5.  **Performance Tuning**: Review BM25 calculation performance for large pages.
+2.  **Refine Text Chunk Extraction**: The current `extract_text_chunks` implementation in `BM25ContentFilter` works but could be optimized to better handle nested block elements and spacing, matching Python's `deque` based approach more closely if edge cases arise.
+3.  **Full Feature Parity**: Continue porting features from Python (e.g., specific extraction strategies, proxies, more detailed config options).
+4.  **Performance Tuning**: Review BM25 calculation performance for large pages.
 
 ## Technical Notes
 - **Browser Sandbox**: The crawler is currently configured with `--no-sandbox` to run in containerized environments. Added `--disable-gpu` and `--disable-setuid-sandbox` for better stability.
