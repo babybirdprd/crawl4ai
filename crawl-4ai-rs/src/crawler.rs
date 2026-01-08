@@ -312,7 +312,7 @@ impl AsyncWebCrawler {
                 };
 
                 let generator = DefaultMarkdownGenerator::new(Some(content_filter));
-                let markdown_result = generator.generate_markdown(&html);
+                let markdown_result = generator.generate_markdown(&html).await;
 
                 let (media, links) = if let Some(ext) = extraction {
                     (Some(ext.media), Some(ext.links))

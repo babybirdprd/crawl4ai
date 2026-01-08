@@ -4,8 +4,8 @@ use crawl_4ai_rs::content_filter::BM25ContentFilter;
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_bm25_content_filter_basic() {
+    #[tokio::test]
+    async fn test_bm25_content_filter_basic() {
         let html = r#"
         <html>
             <body>
@@ -21,7 +21,7 @@ mod tests {
         "#;
 
         let filter = BM25ContentFilter::new(Some("important relevant".to_string()), 0.5);
-        let filtered_html = filter.filter_content(html);
+        let filtered_html = filter.filter_content(html).await;
 
         println!("Filtered HTML: {}", filtered_html);
 
@@ -30,8 +30,8 @@ mod tests {
         assert!(!filtered_html.contains("Garbage content"));
     }
 
-    #[test]
-    fn test_bm25_content_filter_no_query() {
+    #[tokio::test]
+    async fn test_bm25_content_filter_no_query() {
         let html = r#"
         <html>
             <head><title>Auto Query Page</title></head>
@@ -45,7 +45,7 @@ mod tests {
 
         // Should auto-detect query from title/h1
         let filter = BM25ContentFilter::default();
-        let filtered_html = filter.filter_content(html);
+        let filtered_html = filter.filter_content(html).await;
 
         println!("Filtered HTML (Auto Query): {}", filtered_html);
 
