@@ -4,6 +4,9 @@ use kuchiki::traits::*;
 use kuchiki::NodeRef;
 use regex::Regex;
 use std::collections::HashMap;
+use sxd_document::parser;
+use sxd_xpath::{evaluate_xpath, Value as XPathValue, Factory, Context};
+use sxd_xpath::nodeset::Node as XPathNode;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonCssExtractionStrategy {
@@ -181,6 +184,196 @@ impl JsonCssExtractionStrategy {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonXPathExtractionStrategy {
+    pub schema: Value,
+}
+
+impl JsonXPathExtractionStrategy {
+    pub fn new(schema: Value) -> Self {
+        Self { schema }
+    }
+
+    pub fn extract(&self, html: &str) -> Vec<Value> {
+        let document = kuchiki::parse_html().one(html);
+        let mut bytes = vec![];
+        let _ = document.serialize(&mut bytes);
+        let xhtml = String::from_utf8_lossy(&bytes);
+
+        let package = match parser::parse(&xhtml) {
+            Ok(p) => p,
+            Err(_) => return vec![],
+        };
+        let doc = package.as_document();
+
+        let schema: ExtractionSchema = match serde_json::from_value(self.schema.clone()) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+
+        let mut results = Vec::new();
+
+        if let Ok(val) = evaluate_xpath(&doc, &schema.base_selector) {
+            if let XPathValue::Nodeset(nodes) = val {
+                 for node in nodes.document_order() {
+                      let mut item = serde_json::Map::new();
+
+                      if let Some(base_fields) = &schema.base_fields {
+                          for field in base_fields {
+                              if let Some(val) = self.extract_single_field(node, field) {
+                                  item.insert(field.name.clone(), val);
+                              }
+                          }
+                      }
+
+                      let field_data = self.extract_item(node, &schema.fields);
+                      if let Some(obj) = field_data.as_object() {
+                          for (k, v) in obj {
+                              item.insert(k.clone(), v.clone());
+                          }
+                      }
+
+                      results.push(Value::Object(item));
+                 }
+            }
+        }
+
+        results
+    }
+
+     fn extract_item<'d>(&self, node: XPathNode<'d>, fields: &[Field]) -> Value {
+        let mut item = serde_json::Map::new();
+        for field in fields {
+            let value = self.extract_field(node, field);
+             if !value.is_null() {
+                item.insert(field.name.clone(), value);
+            }
+        }
+        Value::Object(item)
+    }
+
+    fn extract_field<'d>(&self, node: XPathNode<'d>, field: &Field) -> Value {
+        match field.type_.as_str() {
+             "nested" => {
+                 if let Some(selector) = &field.selector {
+                      let factory = Factory::new();
+                      let xpath = match factory.build(selector) {
+                          Ok(Some(x)) => x,
+                          _ => return Value::Null,
+                      };
+                      let context = Context::new();
+
+                      if let Ok(val) = xpath.evaluate(&context, node) {
+                          if let XPathValue::Nodeset(nodes) = val {
+                              if let Some(child) = nodes.document_order().first() {
+                                   if let Some(nested_fields) = &field.fields {
+                                       return self.extract_item(*child, nested_fields);
+                                   }
+                              }
+                          }
+                      }
+                 }
+                 Value::Null
+             },
+             "list" | "nested_list" => {
+                  if let Some(selector) = &field.selector {
+                      let factory = Factory::new();
+                      let xpath = match factory.build(selector) {
+                          Ok(Some(x)) => x,
+                          _ => return Value::Null,
+                      };
+                      let context = Context::new();
+
+                      let mut list = Vec::new();
+                       if let Ok(val) = xpath.evaluate(&context, node) {
+                          if let XPathValue::Nodeset(nodes) = val {
+                              for child in nodes.document_order() {
+                                  if let Some(nested_fields) = &field.fields {
+                                      list.push(self.extract_item(child, nested_fields));
+                                  }
+                              }
+                          }
+                      }
+                      return Value::Array(list);
+                  }
+                  Value::Null
+             },
+             _ => self.extract_single_field(node, field).unwrap_or(Value::Null)
+        }
+    }
+
+     fn extract_single_field<'d>(&self, node: XPathNode<'d>, field: &Field) -> Option<Value> {
+        let target_node = if let Some(selector) = &field.selector {
+            let factory = Factory::new();
+            if let Ok(Some(xpath)) = factory.build(selector) {
+                let context = Context::new();
+                if let Ok(val) = xpath.evaluate(&context, node) {
+                     if let XPathValue::Nodeset(nodes) = val {
+                         nodes.document_order().first().cloned()
+                     } else {
+                         None
+                     }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            Some(node)
+        };
+
+        if let Some(n) = target_node {
+             let val = match field.type_.as_str() {
+                 "text" => Some(Value::String(n.string_value())),
+                 "attribute" => {
+                     if let Some(attr_name) = &field.attribute {
+                         if let Some(elem) = n.element() {
+                             elem.attribute_value(attr_name.as_str()).map(|v| Value::String(v.to_string()))
+                         } else { None }
+                     } else {
+                         Some(Value::String(n.string_value()))
+                     }
+                 },
+                 "html" => {
+                     Some(Value::String(n.string_value()))
+                 },
+                 "regex" => {
+                    if let Some(pattern) = &field.pattern {
+                        if let Ok(re) = Regex::new(pattern) {
+                            let text = n.string_value();
+                            if let Some(caps) = re.captures(&text) {
+                                let m = caps.get(1).or_else(|| caps.get(0)).map(|m| m.as_str().to_string());
+                                m.map(Value::String)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                 },
+                 _ => None
+             };
+
+             if let Some(transform) = &field.transform {
+                 if let Some(Value::String(s)) = val {
+                     match transform.as_str() {
+                         "lowercase" => return Some(Value::String(s.to_lowercase())),
+                         "uppercase" => return Some(Value::String(s.to_uppercase())),
+                         _ => return Some(Value::String(s))
+                     }
+                 }
+             }
+             return val;
+        }
+
+        field.default.clone()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RegexExtractionStrategy {
     patterns: HashMap<String, Regex>,
@@ -210,7 +403,6 @@ impl RegexExtractionStrategy {
             ("ipv4", r"(?:\d{1,3}\.){3}\d{1,3}"),
             ("ipv6", r"[A-F0-9]{1,4}(?::[A-F0-9]{1,4}){7}"),
             ("uuid", r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"),
-            // Note: Currency symbols might need careful handling in regex crates
             ("currency", r"(?:USD|EUR|RM|\$|€|£)\s?\d+(?:[.,]\d{2})?"),
             ("percentage", r"\d+(?:\.\d+)?%"),
             ("number", r"\b\d{1,3}(?:[,.\s]\d{3})*(?:\.\d+)?\b"),
@@ -344,5 +536,40 @@ mod tests {
 
         assert_eq!(urls.len(), 1);
         assert_eq!(urls[0]["value"], "https://example.com");
+    }
+
+    #[test]
+    fn test_json_xpath_extraction() {
+        let html = r#"
+        <html>
+            <body>
+                <div class="product">
+                    <h2>Product 1</h2>
+                    <span class="price">$10</span>
+                </div>
+                <div class="product">
+                    <h2>Product 2</h2>
+                    <span class="price">$20</span>
+                </div>
+            </body>
+        </html>
+        "#;
+
+        let schema = json!({
+            "baseSelector": "//div[@class='product']",
+            "fields": [
+                {"name": "name", "selector": "h2", "type": "text"},
+                {"name": "price", "selector": "span[@class='price']", "type": "text"}
+            ]
+        });
+
+        let strategy = JsonXPathExtractionStrategy::new(schema);
+        let results = strategy.extract(html);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["name"], "Product 1");
+        assert_eq!(results[0]["price"], "$10");
+        assert_eq!(results[1]["name"], "Product 2");
+        assert_eq!(results[1]["price"], "$20");
     }
 }
