@@ -9,10 +9,12 @@
 - **Content Filtering**:
     - `PruningContentFilter` (DOM pruning).
     - `BM25ContentFilter` (Text ranking).
-    - **New**: `LLMContentFilter` (LLM-based filtering/summarization) implemented in `src/content_filter.rs`.
+    - `LLMContentFilter` (LLM-based filtering/summarization).
+    - **Refactored**: `src/content_filter.rs` has been split into a module `src/content_filter/` with `pruning.rs`, `bm25.rs`, and `llm.rs`.
 - **Extraction Strategies**:
     - `JsonCssExtractionStrategy`: Supports extracting structured data (text, attributes, html, regex) using CSS selectors.
     - `RegexExtractionStrategy`: Supports extracting entities (emails, URLs, phones, etc.) using regex patterns.
+    - **New**: `JsonXPathExtractionStrategy`: Implemented using `sxd-xpath` and `sxd-document`. It currently supports standard XPath queries on XHTML-compatible content.
 - **Markdown Generation**: Implementation updated to be `async` to support LLM filtering.
 - **Session Management**: Implemented.
 
@@ -24,28 +26,25 @@
 - `rust-stemmers` for BM25.
 - `regex` for pattern matching.
 - `wiremock` (dev-dependency) for testing API calls.
+- **New**: `sxd-xpath` and `sxd-document` for XPath support.
 
 ## Recent Changes
-- **Ported `LLMContentFilter`**:
-    - Added `LLMConfig` and `LLMContentFilter` structs to `src/content_filter.rs`.
-    - Refactored `ContentFilter::filter_content` and `DefaultMarkdownGenerator::generate_markdown` to be `async`.
-    - Implemented chunking logic (`merge_chunks`) matching Python's approach.
-    - Implemented parallel async API calls with backoff retry logic using `reqwest` and `tokio`.
-    - Added `tests/test_llm_filter.rs` with `wiremock` tests.
-- **Updated `AsyncWebCrawler`**:
-    - `arun` method now awaits `generate_markdown`.
+- **Refactored `content_filter.rs`**: Split the large file into manageable submodules.
+- **Ported `JsonXPathExtractionStrategy`**: Added XPath support for structured extraction. Note that `sxd-document` requires valid XML/XHTML, so the HTML is serialized before parsing.
+- **Retry Logic**: Attempted to add unit tests for retry logic, but encountered difficulties mocking browser connection failures reliably.
 
 ## Next Steps for the Next Agent (The "Heavy" Tasks)
-1.  **Port `JsonXPathExtractionStrategy`**:
-    -   Currently `kuchiki` only supports CSS. To support XPath, you might need `libxml` bindings (like `libxml` crate) or another library like `sxd-xpath`. This is a non-trivial dependency decision.
-2.  **Unit Tests for Retry Logic**:
-    -   Create strict unit tests that mock the browser or network failures to verify the retry mechanism in `AsyncWebCrawler`.
+1.  **Robust XPath Support**:
+    -   The current `JsonXPathExtractionStrategy` relies on `kuchiki` to serialize HTML to text, then `sxd-document` to parse it. This might be brittle for malformed HTML. Investigate using `libxml` or a more forgiving XML parser if `sxd-document` proves too strict for real-world scraping.
+    -   Optimize the implementation to avoid re-compiling XPath queries for every field.
+2.  **Advanced Retry Testing**:
+    -   Implement a robust integration test for `AsyncWebCrawler`'s retry logic. This might require a custom proxy or a more sophisticated mock server setup to simulate connection drops/resets that trigger the browser's retry mechanism.
 3.  **Performance Tuning**:
-    -   The BM25 calculation in Rust is naive. For very large pages, optimize the tokenization and scoring loops.
-4.  **Refactor `content_filter.rs`**:
-    -   The file is growing large. Consider splitting `Pruning`, `BM25`, and `LLM` into separate files under a `content_filter` module directory.
+    -   Analyze `BM25ContentFilter` and extraction strategies for performance on large documents.
+4.  **Documentation**:
+    -   Add Rust documentation (doc comments) to the new modules and public APIs.
 
 ## Technical Notes
 - **Testing**: Run tests with `cargo test -- --test-threads=1` to avoid browser contention during integration tests.
-- **Chrome Executable**: When running tests locally, if `chromiumoxide` fails to find Chrome, use `playwright install chromium` and set `CHROME_EXECUTABLE` to the path (e.g., `~/.cache/ms-playwright/.../chrome`).
-- **Async Trait Methods**: `ContentFilter` methods are now `async`. If adding new filters, ensure they follow this pattern.
+- **Chrome Executable**: When running tests locally, if `chromiumoxide` fails to find Chrome, use `playwright install chromium` and set `CHROME_EXECUTABLE` to the path.
+- **XPath Limitation**: `sxd-xpath` supports XPath 1.0. Newer XPath features are not available.
