@@ -8,39 +8,44 @@
 - **Error Handling**: Implemented `CrawlerError` and robust retry logic.
 - **Content Filtering**:
     - `PruningContentFilter` (DOM pruning).
-    - `BM25ContentFilter` (Text ranking) - **Refined** to use stack-based traversal matching Python's logic.
+    - `BM25ContentFilter` (Text ranking).
+    - **New**: `LLMContentFilter` (LLM-based filtering/summarization) implemented in `src/content_filter.rs`.
 - **Extraction Strategies**:
     - `JsonCssExtractionStrategy`: Supports extracting structured data (text, attributes, html, regex) using CSS selectors.
-    - **New**: `RegexExtractionStrategy`: Implemented in `src/extraction_strategy.rs`. Supports extracting entities (emails, URLs, phones, etc.) using regex patterns.
-- **Markdown Generation**: Basic implementation.
+    - `RegexExtractionStrategy`: Supports extracting entities (emails, URLs, phones, etc.) using regex patterns.
+- **Markdown Generation**: Implementation updated to be `async` to support LLM filtering.
 - **Session Management**: Implemented.
 
 ## Dependencies
 - `chromiumoxide` for browser automation.
 - `kuchiki` for HTML parsing and CSS selectors.
 - `serde`, `serde_json` for data handling.
-- `reqwest` for HTTP.
+- `reqwest` for HTTP (used by `LLMContentFilter`).
 - `rust-stemmers` for BM25.
 - `regex` for pattern matching.
+- `wiremock` (dev-dependency) for testing API calls.
 
 ## Recent Changes
-- **Ported `RegexExtractionStrategy`**: Added `RegexExtractionStrategy` struct and implementation in `src/extraction_strategy.rs`. It includes default patterns for common entities (email, url, phone, etc.) matching the Python implementation.
-- **Updated `JsonCssExtractionStrategy`**: Added support for `type: "regex"` in fields, allowing regex extraction on top of CSS selection.
-- **Testing**: Added unit tests for `RegexExtractionStrategy` and `JsonCssExtractionStrategy` regex support in `src/extraction_strategy.rs`. Verified all tests pass.
+- **Ported `LLMContentFilter`**:
+    - Added `LLMConfig` and `LLMContentFilter` structs to `src/content_filter.rs`.
+    - Refactored `ContentFilter::filter_content` and `DefaultMarkdownGenerator::generate_markdown` to be `async`.
+    - Implemented chunking logic (`merge_chunks`) matching Python's approach.
+    - Implemented parallel async API calls with backoff retry logic using `reqwest` and `tokio`.
+    - Added `tests/test_llm_filter.rs` with `wiremock` tests.
+- **Updated `AsyncWebCrawler`**:
+    - `arun` method now awaits `generate_markdown`.
 
 ## Next Steps for the Next Agent (The "Heavy" Tasks)
-1.  **Port `LLMContentFilter`**: This is a major missing feature. It requires:
-    -   Implementing a client for LLM providers (OpenAI, etc.) using `reqwest`.
-    -   Porting the logic that chunks HTML and sends it to the LLM for cleaning/markdown generation.
-    -   Implementing the `perform_completion_with_backoff` utility (retry logic for API calls).
-2.  **Port `JsonXPathExtractionStrategy`**:
+1.  **Port `JsonXPathExtractionStrategy`**:
     -   Currently `kuchiki` only supports CSS. To support XPath, you might need `libxml` bindings (like `libxml` crate) or another library like `sxd-xpath`. This is a non-trivial dependency decision.
-3.  **Unit Tests for Retry Logic**:
+2.  **Unit Tests for Retry Logic**:
     -   Create strict unit tests that mock the browser or network failures to verify the retry mechanism in `AsyncWebCrawler`.
-4.  **Performance Tuning**:
+3.  **Performance Tuning**:
     -   The BM25 calculation in Rust is naive. For very large pages, optimize the tokenization and scoring loops.
+4.  **Refactor `content_filter.rs`**:
+    -   The file is growing large. Consider splitting `Pruning`, `BM25`, and `LLM` into separate files under a `content_filter` module directory.
 
 ## Technical Notes
 - **Testing**: Run tests with `cargo test -- --test-threads=1` to avoid browser contention during integration tests.
 - **Chrome Executable**: When running tests locally, if `chromiumoxide` fails to find Chrome, use `playwright install chromium` and set `CHROME_EXECUTABLE` to the path (e.g., `~/.cache/ms-playwright/.../chrome`).
-- **Schema**: The `JsonCssExtractionStrategy` uses a `serde_json::Value` schema. The structure matches the Python version (`baseSelector`, `fields`, `type`, etc.).
+- **Async Trait Methods**: `ContentFilter` methods are now `async`. If adding new filters, ensure they follow this pattern.
