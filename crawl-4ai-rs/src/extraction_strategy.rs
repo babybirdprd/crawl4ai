@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use kuchiki::traits::*;
 use kuchiki::NodeRef;
+use kuchiki::NodeData;
 use regex::Regex;
 use std::collections::HashMap;
-use sxd_document::parser;
+use sxd_document::Package;
 use sxd_xpath::{evaluate_xpath, Value as XPathValue, Factory, Context};
 use sxd_xpath::nodeset::Node as XPathNode;
 
@@ -196,15 +197,11 @@ impl JsonXPathExtractionStrategy {
 
     pub fn extract(&self, html: &str) -> Vec<Value> {
         let document = kuchiki::parse_html().one(html);
-        let mut bytes = vec![];
-        let _ = document.serialize(&mut bytes);
-        let xhtml = String::from_utf8_lossy(&bytes);
-
-        let package = match parser::parse(&xhtml) {
-            Ok(p) => p,
-            Err(_) => return vec![],
-        };
+        let package = Package::new();
         let doc = package.as_document();
+
+        // Convert kuchiki DOM to sxd_document DOM
+        convert_kuchiki_to_sxd(&document, &doc, None);
 
         let schema: ExtractionSchema = match serde_json::from_value(self.schema.clone()) {
             Ok(s) => s,
@@ -371,6 +368,41 @@ impl JsonXPathExtractionStrategy {
         }
 
         field.default.clone()
+    }
+}
+
+fn convert_kuchiki_to_sxd(k_node: &NodeRef, s_doc: &sxd_document::dom::Document, s_parent: Option<sxd_document::dom::Element>) {
+    for child in k_node.children() {
+        match child.data() {
+            NodeData::Element(data) => {
+                let name = &data.name.local;
+                let s_element = s_doc.create_element(name.as_ref());
+
+                // Add attributes
+                for (key, value) in &data.attributes.borrow().map {
+                    s_element.set_attribute_value(key.local.as_ref(), &value.value);
+                }
+
+                if let Some(parent) = s_parent {
+                    parent.append_child(s_element);
+                } else {
+                     s_doc.root().append_child(s_element);
+                }
+
+                convert_kuchiki_to_sxd(&child, s_doc, Some(s_element));
+            },
+            NodeData::Text(text) => {
+                 if let Some(parent) = s_parent {
+                     let s_text = s_doc.create_text(&text.borrow());
+                     parent.append_child(s_text);
+                 }
+            },
+            _ => {
+                // For other node types (Comment, Doctype, etc.), we recurse but don't create sxd nodes
+                // This ensures we traverse through Document node and others to find Elements
+                convert_kuchiki_to_sxd(&child, s_doc, s_parent);
+            }
+        }
     }
 }
 
