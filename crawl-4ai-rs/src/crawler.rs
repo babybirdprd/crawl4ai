@@ -1,6 +1,8 @@
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::target::{CreateBrowserContextParams, CreateTargetParams};
 use chromiumoxide::cdp::browser_protocol::browser::BrowserContextId;
+use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
+use chromiumoxide::page::ScreenshotParams;
 use futures::StreamExt;
 use anyhow::{Result, anyhow};
 use crate::models::{CrawlResult, MediaItem, Link, CrawlerRunConfig, WaitStrategy};
@@ -239,6 +241,30 @@ impl AsyncWebCrawler {
 
                 let html = page.content().await?;
 
+                let screenshot_data = if let Some(ref cfg) = config {
+                    if cfg.screenshot {
+                        let params = ScreenshotParams::builder()
+                            .format(CaptureScreenshotFormat::Png)
+                            .full_page(true)
+                            .build();
+
+                        match page.screenshot(params).await {
+                            Ok(bytes) => {
+                                use base64::{Engine as _, engine::general_purpose};
+                                Some(general_purpose::STANDARD.encode(bytes))
+                            },
+                            Err(e) => {
+                                eprintln!("Failed to take screenshot: {}", e);
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 // Extract media and links using JavaScript
                 let script = r#"
                     (() => {
@@ -327,7 +353,7 @@ impl AsyncWebCrawler {
                     cleaned_html: None,
                     media,
                     links,
-                    screenshot: None,
+                    screenshot: screenshot_data,
                     markdown: Some(markdown_result),
                     extracted_content: None,
                     error_message: None,

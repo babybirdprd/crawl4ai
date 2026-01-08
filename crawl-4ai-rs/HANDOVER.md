@@ -17,6 +17,8 @@
     - **JsonXPathExtractionStrategy**: Fully implemented and tested. It converts the `kuchiki` (HTML) DOM directly to an `sxd-document` (XPath) DOM, allowing robust querying even on malformed HTML (e.g., unclosed tags).
 - **Markdown Generation**: Implementation updated to be `async` to support LLM filtering.
 - **Session Management**: Implemented.
+- **CLI**: Implemented a command-line interface in `src/main.rs` (binary `crawl4ai`) to crawl URLs, generate Markdown/JSON, and take screenshots.
+- **Screenshots**: Added `screenshot` boolean to `CrawlerRunConfig` and `screenshot` field to `CrawlResult`.
 
 ## Dependencies
 - `chromiumoxide` for browser automation.
@@ -41,8 +43,16 @@
     -   Benchmark the new `JsonXPathExtractionStrategy` conversion overhead.
 3.  **Documentation**:
     -   Add Rust documentation (doc comments) to the new modules and public APIs.
-4.  **CLI Interface**:
-    -   Create a CLI binary that exposes the crawler functionality (URL input, output format selection, strategy configuration).
+4.  **Strategy Configuration via CLI**:
+    -   Currently, the CLI (`src/main.rs`) only performs a basic crawl. Extend it to support passing extraction strategies (CSS/XPath/Regex) via JSON config or command-line flags.
+
+## CLI Usage
+The project now includes a CLI binary. You can run it via `cargo run --bin crawl4ai`.
+```bash
+cargo run --bin crawl4ai -- https://example.com --format markdown
+cargo run --bin crawl4ai -- https://example.com --output result.json --format json
+cargo run --bin crawl4ai -- https://example.com --screenshot --output page.md
+```
 
 ## Technical Notes
 - **Testing**: Run tests with `cargo test -- --test-threads=1` to avoid browser contention during integration tests.
