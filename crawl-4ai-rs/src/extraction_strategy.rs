@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use kuchiki::traits::*;
 use kuchiki::NodeRef;
+use regex::Regex;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonCssExtractionStrategy {
@@ -28,6 +30,7 @@ pub struct Field {
     pub transform: Option<String>,
     pub fields: Option<Vec<Field>>,
     pub default: Option<Value>,
+    pub pattern: Option<String>,
 }
 
 impl JsonCssExtractionStrategy {
@@ -141,7 +144,24 @@ impl JsonCssExtractionStrategy {
                      let _ = n.serialize(&mut bytes);
                      Some(Value::String(String::from_utf8_lossy(&bytes).to_string()))
                  },
-                 // Regex skipped for now as we don't have regex crate
+                 "regex" => {
+                    if let Some(pattern) = &field.pattern {
+                        if let Ok(re) = Regex::new(pattern) {
+                            let text = n.text_contents();
+                            if let Some(caps) = re.captures(&text) {
+                                // Return the first group if available, otherwise the match
+                                let m = caps.get(1).or_else(|| caps.get(0)).map(|m| m.as_str().to_string());
+                                m.map(Value::String)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                 },
                  _ => None
              };
 
@@ -158,6 +178,63 @@ impl JsonCssExtractionStrategy {
         }
 
         field.default.clone()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RegexExtractionStrategy {
+    patterns: HashMap<String, Regex>,
+}
+
+impl RegexExtractionStrategy {
+    pub fn new() -> Self {
+        Self::with_patterns(Self::default_patterns())
+    }
+
+    pub fn with_patterns(patterns: Vec<(&str, &str)>) -> Self {
+        let mut map = HashMap::new();
+        for (name, pat) in patterns {
+            if let Ok(re) = Regex::new(pat) {
+                map.insert(name.to_string(), re);
+            }
+        }
+        Self { patterns: map }
+    }
+
+    pub fn default_patterns() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("email", r"[\w.+-]+@[\w-]+\.[\w.-]+"),
+            ("phone_intl", r"\+?\d[\d .()-]{7,}\d"),
+            ("phone_us", r"\(?\d{3}\)?[ -. ]?\d{3}[ -. ]?\d{4}"),
+            ("url", r"https?://[^\s\x22'<>]+"),
+            ("ipv4", r"(?:\d{1,3}\.){3}\d{1,3}"),
+            ("ipv6", r"[A-F0-9]{1,4}(?::[A-F0-9]{1,4}){7}"),
+            ("uuid", r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"),
+            // Note: Currency symbols might need careful handling in regex crates
+            ("currency", r"(?:USD|EUR|RM|\$|€|£)\s?\d+(?:[.,]\d{2})?"),
+            ("percentage", r"\d+(?:\.\d+)?%"),
+            ("number", r"\b\d{1,3}(?:[,.\s]\d{3})*(?:\.\d+)?\b"),
+            ("date_iso", r"\d{4}-\d{2}-\d{2}"),
+            ("date_us", r"\d{1,2}/\d{1,2}/\d{2,4}"),
+            ("time_24h", r"\b(?:[01]?\d|2[0-3]):[0-5]\d(?:[:.][0-5]\d)?\b"),
+        ]
+    }
+
+    pub fn extract(&self, url: &str, content: &str) -> Vec<Value> {
+        let mut results = Vec::new();
+        for (label, re) in &self.patterns {
+            for cap in re.captures_iter(content) {
+                 if let Some(m) = cap.get(0) {
+                     results.push(serde_json::json!({
+                         "url": url,
+                         "label": label,
+                         "value": m.as_str(),
+                         "span": [m.start(), m.end()]
+                     }));
+                 }
+            }
+        }
+        results
     }
 }
 
@@ -227,5 +304,45 @@ mod tests {
         let results = strategy.extract(html);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["details"]["info"], "Info");
+    }
+
+    #[test]
+    fn test_regex_in_css_extraction() {
+        let html = r#"
+        <div class="content">
+            <p>Order ID: #12345</p>
+        </div>
+        "#;
+        let schema = json!({
+            "baseSelector": ".content",
+            "fields": [
+                {
+                    "name": "order_id",
+                    "selector": "p",
+                    "type": "regex",
+                    "pattern": r"#(\d+)"
+                }
+            ]
+        });
+        let strategy = JsonCssExtractionStrategy::new(schema);
+        let results = strategy.extract(html);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["order_id"], "12345");
+    }
+
+    #[test]
+    fn test_regex_extraction_strategy() {
+        let content = "Contact us at support@example.com or call 123-456-7890. Visit https://example.com";
+        let strategy = RegexExtractionStrategy::new();
+        let results = strategy.extract("http://page.com", content);
+
+        let emails: Vec<&Value> = results.iter().filter(|v| v["label"] == "email").collect();
+        let urls: Vec<&Value> = results.iter().filter(|v| v["label"] == "url").collect();
+
+        assert_eq!(emails.len(), 1);
+        assert_eq!(emails[0]["value"], "support@example.com");
+
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0]["value"], "https://example.com");
     }
 }

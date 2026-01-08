@@ -399,6 +399,7 @@ dependencies = [
  "futures",
  "html2text",
  "kuchiki",
+ "regex",
  "reqwest",
  "rust-stemmers",
  "serde",
