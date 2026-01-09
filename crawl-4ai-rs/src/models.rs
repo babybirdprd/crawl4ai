@@ -15,6 +15,8 @@ pub struct CrawlerRunConfig {
     pub session_id: Option<String>,
     pub wait_for: Option<WaitStrategy>,
     pub content_filter: Option<ContentFilter>,
+    #[serde(default)]
+    pub screenshot: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
