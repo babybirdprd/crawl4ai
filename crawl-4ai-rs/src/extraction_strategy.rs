@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use sxd_document::Package;
 use sxd_xpath::{evaluate_xpath, Value as XPathValue, Factory, Context};
 use sxd_xpath::nodeset::Node as XPathNode;
+use std::sync::{Arc, Mutex};
 
 /// A strategy for extracting structured data using CSS selectors.
 ///
@@ -438,9 +439,11 @@ fn convert_kuchiki_to_sxd(k_node: &NodeRef, s_doc: &sxd_document::dom::Document,
 ///
 /// This strategy scans the text content of the page for common patterns
 /// like emails, phone numbers, URLs, etc. It can be configured with custom patterns.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegexExtractionStrategy {
-    patterns: HashMap<String, Regex>,
+    patterns: HashMap<String, String>,
+    #[serde(skip)]
+    compiled: Arc<Mutex<HashMap<String, Regex>>>,
 }
 
 impl RegexExtractionStrategy {
@@ -453,11 +456,12 @@ impl RegexExtractionStrategy {
     pub fn with_patterns(patterns: Vec<(&str, &str)>) -> Self {
         let mut map = HashMap::new();
         for (name, pat) in patterns {
-            if let Ok(re) = Regex::new(pat) {
-                map.insert(name.to_string(), re);
-            }
+            map.insert(name.to_string(), pat.to_string());
         }
-        Self { patterns: map }
+        Self {
+            patterns: map,
+            compiled: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Returns a list of default regex patterns (email, url, phone, etc.).
@@ -482,19 +486,37 @@ impl RegexExtractionStrategy {
     /// Extracts entities from the provided content string.
     pub fn extract(&self, url: &str, content: &str) -> Vec<Value> {
         let mut results = Vec::new();
-        for (label, re) in &self.patterns {
-            for cap in re.captures_iter(content) {
-                 if let Some(m) = cap.get(0) {
-                     results.push(serde_json::json!({
-                         "url": url,
-                         "label": label,
-                         "value": m.as_str(),
-                         "span": [m.start(), m.end()]
-                     }));
+
+        let mut compiled = self.compiled.lock().unwrap();
+
+        for (label, pattern) in &self.patterns {
+            if !compiled.contains_key(pattern) {
+                 if let Ok(re) = Regex::new(pattern) {
+                     compiled.insert(pattern.clone(), re);
                  }
+            }
+
+            if let Some(re) = compiled.get(pattern) {
+                for cap in re.captures_iter(content) {
+                     if let Some(m) = cap.get(0) {
+                         results.push(serde_json::json!({
+                             "url": url,
+                             "label": label,
+                             "value": m.as_str(),
+                             "span": [m.start(), m.end()]
+                         }));
+                     }
+                }
             }
         }
         results
+    }
+}
+
+// Make sure that deserialization initializes the compiled map
+impl Default for RegexExtractionStrategy {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
