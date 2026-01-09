@@ -9,39 +9,60 @@ use sxd_document::Package;
 use sxd_xpath::{evaluate_xpath, Value as XPathValue, Factory, Context};
 use sxd_xpath::nodeset::Node as XPathNode;
 
+/// A strategy for extracting structured data using CSS selectors.
+///
+/// This strategy accepts a JSON schema defining the base selector and fields to extract.
+/// It supports nested fields, lists, and various data types (text, attribute, html, regex).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonCssExtractionStrategy {
+    /// The extraction schema.
     pub schema: Value,
 }
 
+/// The schema used for defining extraction rules.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExtractionSchema {
+    /// Optional name for the schema.
     pub name: Option<String>,
+    /// The base CSS selector to identify the root elements for extraction.
     #[serde(rename = "baseSelector")]
     pub base_selector: String,
+    /// Common fields to extract from the root element itself (optional).
     #[serde(rename = "baseFields")]
     pub base_fields: Option<Vec<Field>>,
+    /// Fields to extract from within the base element.
     pub fields: Vec<Field>,
 }
 
+/// A single field to be extracted.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Field {
+    /// The name of the field in the output JSON.
     pub name: String,
+    /// The CSS selector (or XPath) relative to the current context (optional).
     pub selector: Option<String>,
+    /// The type of extraction ("text", "attribute", "html", "regex", "nested", "list").
     #[serde(rename = "type")]
     pub type_: String,
+    /// The attribute name to extract if type is "attribute".
     pub attribute: Option<String>,
+    /// Transformation to apply to the extracted value (e.g., "lowercase").
     pub transform: Option<String>,
+    /// Nested fields if type is "nested" or "list".
     pub fields: Option<Vec<Field>>,
+    /// Default value if extraction fails.
     pub default: Option<Value>,
+    /// Regex pattern if type is "regex".
     pub pattern: Option<String>,
 }
 
 impl JsonCssExtractionStrategy {
+    /// Creates a new `JsonCssExtractionStrategy` with the given schema.
     pub fn new(schema: Value) -> Self {
         Self { schema }
     }
 
+    /// Extracts data from the provided HTML string.
     pub fn extract(&self, html: &str) -> Vec<Value> {
         let schema: ExtractionSchema = match serde_json::from_value(self.schema.clone()) {
             Ok(s) => s,
@@ -185,16 +206,23 @@ impl JsonCssExtractionStrategy {
     }
 }
 
+/// A strategy for extracting structured data using XPath.
+///
+/// This strategy converts the HTML DOM to an XML-compatible DOM to allow
+/// XPath queries. It is robust against malformed HTML.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonXPathExtractionStrategy {
+    /// The extraction schema.
     pub schema: Value,
 }
 
 impl JsonXPathExtractionStrategy {
+    /// Creates a new `JsonXPathExtractionStrategy` with the given schema.
     pub fn new(schema: Value) -> Self {
         Self { schema }
     }
 
+    /// Extracts data from the provided HTML string.
     pub fn extract(&self, html: &str) -> Vec<Value> {
         let document = kuchiki::parse_html().one(html);
         let package = Package::new();
@@ -406,16 +434,22 @@ fn convert_kuchiki_to_sxd(k_node: &NodeRef, s_doc: &sxd_document::dom::Document,
     }
 }
 
+/// A strategy for extracting entities using Regex patterns.
+///
+/// This strategy scans the text content of the page for common patterns
+/// like emails, phone numbers, URLs, etc. It can be configured with custom patterns.
 #[derive(Debug, Clone)]
 pub struct RegexExtractionStrategy {
     patterns: HashMap<String, Regex>,
 }
 
 impl RegexExtractionStrategy {
+    /// Creates a new `RegexExtractionStrategy` with default patterns.
     pub fn new() -> Self {
         Self::with_patterns(Self::default_patterns())
     }
 
+    /// Creates a new `RegexExtractionStrategy` with custom patterns.
     pub fn with_patterns(patterns: Vec<(&str, &str)>) -> Self {
         let mut map = HashMap::new();
         for (name, pat) in patterns {
@@ -426,6 +460,7 @@ impl RegexExtractionStrategy {
         Self { patterns: map }
     }
 
+    /// Returns a list of default regex patterns (email, url, phone, etc.).
     pub fn default_patterns() -> Vec<(&'static str, &'static str)> {
         vec![
             ("email", r"[\w.+-]+@[\w-]+\.[\w.-]+"),
@@ -444,6 +479,7 @@ impl RegexExtractionStrategy {
         ]
     }
 
+    /// Extracts entities from the provided content string.
     pub fn extract(&self, url: &str, content: &str) -> Vec<Value> {
         let mut results = Vec::new();
         for (label, re) in &self.patterns {
