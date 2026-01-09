@@ -5,7 +5,7 @@ use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::page::ScreenshotParams;
 use futures::StreamExt;
 use anyhow::{Result, anyhow};
-use crate::models::{CrawlResult, MediaItem, Link, CrawlerRunConfig, WaitStrategy};
+use crate::models::{CrawlResult, MediaItem, Link, CrawlerRunConfig, WaitStrategy, ExtractionStrategyConfig};
 use crate::markdown::DefaultMarkdownGenerator;
 use crate::content_filter::{PruningContentFilter, ContentFilter};
 use std::env;
@@ -383,6 +383,28 @@ impl AsyncWebCrawler {
                     (None, None)
                 };
 
+                // Execute extraction strategy if present
+                let extracted_content = if let Some(ref cfg) = config {
+                    if let Some(ref strategy) = cfg.extraction_strategy {
+                         let results = match strategy {
+                             ExtractionStrategyConfig::JsonCss(s) => s.extract(&html),
+                             ExtractionStrategyConfig::JsonXPath(s) => s.extract(&html),
+                             ExtractionStrategyConfig::Regex(s) => s.extract(url, &html),
+                         };
+                         match serde_json::to_string(&results) {
+                             Ok(s) => Some(s),
+                             Err(e) => {
+                                 eprintln!("Failed to serialize extraction results: {}", e);
+                                 None
+                             }
+                         }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 Ok(CrawlResult {
                     url: url.to_string(),
                     html,
@@ -392,7 +414,7 @@ impl AsyncWebCrawler {
                     links,
                     screenshot: screenshot_data,
                     markdown: Some(markdown_result),
-                    extracted_content: None,
+                    extracted_content,
                     error_message: None,
                 })
             }.await;
@@ -421,5 +443,101 @@ impl AsyncWebCrawler {
                 }
             }
         }
+    }
+}
+
+/// Generic retry logic with exponential backoff.
+///
+/// # Arguments
+///
+/// * `operation` - A closure that returns a `Result`.
+/// * `max_retries` - Maximum number of retries.
+/// * `base_delay` - Base delay in milliseconds for backoff.
+#[allow(dead_code)]
+async fn retry_with_backoff<F, Fut, T>(
+    mut operation: F,
+    max_retries: u32,
+    base_delay: u64,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match operation().await {
+            Ok(val) => return Ok(val),
+            Err(e) => {
+                if attempt > max_retries {
+                    return Err(e);
+                }
+
+                let err_str = e.to_string();
+                // Check if it's a fatal error that shouldn't be retried?
+                // For now, we assume the caller handles fatal errors inside the operation
+                // or we can inspect here.
+                // But specifically for this generic function, we retry on all errors unless
+                // we want to add a predicate.
+                // However, the original logic had specific checks for "oneshot canceled" etc.
+                // to decide whether to restart the browser. That logic is stateful.
+                // So this generic retry might just be for the "try again" part.
+
+                // Let's keep it simple: retry on everything up to max_retries.
+
+                eprintln!("Operation failed (attempt {}/{}): {}", attempt, max_retries, err_str);
+                tokio::time::sleep(Duration::from_millis(base_delay * attempt as u64)).await;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn test_retry_success() {
+        let counter = Arc::new(Mutex::new(0));
+        let counter_clone = counter.clone();
+
+        let result = retry_with_backoff(
+            || async {
+                let mut c = counter_clone.lock().unwrap();
+                *c += 1;
+                if *c < 2 {
+                    Err(anyhow!("Fail"))
+                } else {
+                    Ok("Success")
+                }
+            },
+            3,
+            10,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(*counter.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_retry_failure() {
+         let counter = Arc::new(Mutex::new(0));
+        let counter_clone = counter.clone();
+
+        let result: Result<&str> = retry_with_backoff(
+            || async {
+                let mut c = counter_clone.lock().unwrap();
+                *c += 1;
+                Err(anyhow!("Fail forever"))
+            },
+            2,
+            10,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(*counter.lock().unwrap(), 3); // 1 initial + 2 retries
     }
 }

@@ -1,9 +1,9 @@
 use clap::{Parser, ValueEnum};
 use crawl_4ai_rs::crawler::AsyncWebCrawler;
-use crawl_4ai_rs::models::{CrawlerRunConfig, CrawlResult};
+use crawl_4ai_rs::models::{CrawlerRunConfig, CrawlResult, ExtractionStrategyConfig};
 use std::fs;
 use std::path::PathBuf;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use log::{info, error};
 
 #[derive(Parser, Debug)]
@@ -24,6 +24,10 @@ struct Args {
     /// Take a screenshot
     #[arg(long, default_value_t = false)]
     screenshot: bool,
+
+    /// Path to extraction strategy JSON config
+    #[arg(long)]
+    extraction_config: Option<PathBuf>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -42,8 +46,19 @@ async fn main() -> Result<()> {
 
     let mut crawler = AsyncWebCrawler::new();
 
+    let extraction_strategy = if let Some(path) = &args.extraction_config {
+        let content = fs::read_to_string(path)
+            .map_err(|e| anyhow!("Failed to read extraction config: {}", e))?;
+        let strategy: ExtractionStrategyConfig = serde_json::from_str(&content)
+            .map_err(|e| anyhow!("Failed to parse extraction config: {}", e))?;
+        Some(strategy)
+    } else {
+        None
+    };
+
     let config = CrawlerRunConfig {
         screenshot: args.screenshot,
+        extraction_strategy,
         ..Default::default()
     };
 

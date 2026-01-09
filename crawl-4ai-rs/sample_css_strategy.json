@@ -1,0 +1,13 @@
+{
+    "type": "css",
+    "schema": {
+        "baseSelector": "div",
+        "fields": [
+            {
+                "name": "content",
+                "selector": "p",
+                "type": "text"
+            }
+        ]
+    }
+}

@@ -5,39 +5,44 @@
 
 ## Current State
 - **Core Crawler**: Implemented `AsyncWebCrawler` using `chromiumoxide`.
-- **Error Handling**: Implemented `CrawlerError` and robust retry logic.
+- **Error Handling**: Implemented `CrawlerError` and robust retry logic (embedded in `arun`).
 - **Content Filtering**:
     - `PruningContentFilter` (DOM pruning).
     - `BM25ContentFilter` (Text ranking).
     - `LLMContentFilter` (LLM-based filtering/summarization).
 - **Extraction Strategies**:
     - `JsonCssExtractionStrategy`: CSS selector based extraction.
-    - `RegexExtractionStrategy`: Regex based extraction.
+    - `RegexExtractionStrategy`: Regex based extraction (with caching).
     - `JsonXPathExtractionStrategy`: XPath based extraction.
+    - **CLI Support**: Added `--extraction-config` to pass strategies via JSON file.
 - **Markdown Generation**: `async` implementation.
 - **Session Management**: Implemented.
 - **CLI**: Implemented in `src/main.rs`.
 - **Documentation**: Added doc comments to `src/crawler.rs`, `src/models.rs`, and `src/extraction_strategy.rs`.
 
 ## Recent Changes
-- **Documentation**: Added comprehensive Rust doc comments to the core modules (`crawler`, `models`, `extraction_strategy`). This should make it much easier for new contributors to understand the codebase.
-- **Refactored `content_filter.rs`**: Split into submodules (done by previous agent).
-- **Fixed `JsonXPathExtractionStrategy`**: Direct DOM-to-DOM conversion (done by previous agent).
+- **CLI Extraction Strategy**: Added support for running extraction strategies via the CLI using `--extraction-config`.
+- **Regex Strategy Optimization**: Optimized `RegexExtractionStrategy` to cache compiled regexes.
+- **Integration**: `AsyncWebCrawler` now executes the configured extraction strategy and returns the result in `extracted_content`.
 
 ## Next Steps for the Next Agent (The "Heavy" Tasks)
-1.  **Advanced Retry Testing**:
-    -   Implement a robust integration test for `AsyncWebCrawler`'s retry logic. This involves simulating connection failures.
-2.  **Performance Tuning**:
-    -   Analyze `BM25ContentFilter` and extraction strategies for performance on large documents.
-    -   Benchmark `JsonXPathExtractionStrategy`.
-3.  **Strategy Configuration via CLI**:
-    -   Extend the CLI (`src/main.rs`) to support passing extraction strategies (CSS/XPath/Regex) via JSON config or command-line flags. Currently it only does basic crawling.
-4.  **Unit Tests for Retry Logic**:
-    -   While integration tests are hard, unit tests for the retry logic *logic* (independent of the browser) could be added if the logic is extracted to a helper function.
+1.  **Refactor Retry Logic**:
+    -   The retry logic is currently embedded in the `arun` loop. Extracting it into a testable, generic policy (like `retry_with_backoff`) is highly desired to allow unit testing without spinning up a full browser. A previous attempt was made but reverted due to complexity in `arun`.
+2.  **Advanced Retry Testing**:
+    -   Implement integration tests that simulate network failures (e.g., using a proxy or mock server that drops connections) to verify the crawler recovers.
+3.  **Performance Tuning**:
+    -   Benchmark `JsonXPathExtractionStrategy` vs `JsonCssExtractionStrategy` on large DOMs.
+    -   Analyze memory usage during long crawls.
+4.  **Wait Strategy Improvements**:
+    -   The current `WaitStrategy` implementation is basic. Consider adding more sophisticated waiting conditions (e.g., network idle).
 
 ## CLI Usage
 ```bash
+# Basic crawl
 cargo run --bin crawl4ai -- https://example.com --format markdown
+
+# With extraction strategy
+cargo run --bin crawl4ai -- https://example.com --extraction-config my_strategy.json --format json
 ```
 
 ## Technical Notes

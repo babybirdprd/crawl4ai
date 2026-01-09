@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::content_filter::ContentFilter;
+use crate::extraction_strategy::{JsonCssExtractionStrategy, JsonXPathExtractionStrategy, RegexExtractionStrategy};
 
 /// Strategy to wait for content to load before extracting it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,6 +15,18 @@ pub enum WaitStrategy {
     JsCondition(String),
 }
 
+/// Configuration for extraction strategy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ExtractionStrategyConfig {
+    #[serde(rename = "css")]
+    JsonCss(JsonCssExtractionStrategy),
+    #[serde(rename = "xpath")]
+    JsonXPath(JsonXPathExtractionStrategy),
+    #[serde(rename = "regex")]
+    Regex(RegexExtractionStrategy),
+}
+
 /// Configuration for a crawler run.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CrawlerRunConfig {
@@ -23,6 +36,8 @@ pub struct CrawlerRunConfig {
     pub wait_for: Option<WaitStrategy>,
     /// Content filter to use for processing HTML.
     pub content_filter: Option<ContentFilter>,
+    /// Extraction strategy to use.
+    pub extraction_strategy: Option<ExtractionStrategyConfig>,
     /// Whether to take a screenshot of the page.
     #[serde(default)]
     pub screenshot: bool,
