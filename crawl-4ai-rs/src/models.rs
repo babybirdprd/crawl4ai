@@ -41,6 +41,8 @@ pub struct CrawlerRunConfig {
     /// Whether to take a screenshot of the page.
     #[serde(default)]
     pub screenshot: bool,
+    /// Timeout for page navigation in milliseconds.
+    pub page_timeout: Option<u64>,
 }
 
 /// Result of a crawl operation.

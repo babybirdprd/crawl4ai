@@ -36,15 +36,6 @@ pub enum CrawlerError {
 }
 
 /// An asynchronous web crawler based on `chromiumoxide`.
-///
-/// This struct manages the browser instance, sessions, and the crawling process.
-/// It supports features like:
-/// - Headless crawling
-/// - Session management (persistent contexts)
-/// - Markdown generation
-/// - Content filtering (Pruning, BM25, LLM)
-/// - Screenshot capture
-/// - JavaScript execution for extraction
 #[derive(Default)]
 pub struct AsyncWebCrawler {
     browser: Option<Browser>,
@@ -69,36 +60,28 @@ impl AsyncWebCrawler {
     }
 
     /// Starts the browser instance.
-    ///
-    /// This method launches a headless Chromium instance. It attempts to locate the
-    /// Chrome executable automatically or uses the `CHROME_EXECUTABLE` environment variable.
-    /// It also spawns a background task to handle browser events.
     pub async fn start(&mut self) -> Result<()> {
         if self.browser.is_some() {
-            // Check if the handler is still running
             if let Some(h) = &self.handle {
                 if !h.is_finished() {
                     return Ok(());
                 }
             }
-            // If finished, we need to restart, so clean up
             self.browser = None;
             self.handle = None;
-            // Also clean sessions as the browser context is gone
             self.sessions.clear();
         }
 
         let mut builder = BrowserConfig::builder();
 
-        // Allow overriding via environment variable
         if let Ok(path) = env::var("CHROME_EXECUTABLE") {
             builder = builder.chrome_executable(Path::new(&path));
         } else {
-             // Fallback: check for chromium as well since it's common in linux envs
              let known_paths = [
                  "/usr/bin/google-chrome-stable",
                  "/usr/bin/chromium",
-                 "/usr/bin/chromium-browser"
+                 "/usr/bin/chromium-browser",
+                 "/home/jules/.cache/ms-playwright/chromium-1187/chrome-linux/chrome"
              ];
 
              for path_str in known_paths {
@@ -137,331 +120,349 @@ impl AsyncWebCrawler {
     }
 
     /// Asynchronously crawls a URL with the given configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `url` - The URL to crawl.
-    /// * `config` - Optional configuration for the crawl run (wait strategies, content filters, etc.).
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing `CrawlResult` on success, or an error.
-    ///
-    /// # Retry Logic
-    ///
-    /// This method includes a retry mechanism (up to 3 attempts) for handling transient
-    /// errors like browser startup failures or session creation issues.
     pub async fn arun(&mut self, url: &str, config: Option<CrawlerRunConfig>) -> Result<CrawlResult> {
         let max_retries = 3;
+        let base_delay = 500;
+
         let mut attempt = 0;
 
         loop {
             attempt += 1;
 
-            // 1. Ensure browser is running
-            if self.browser.is_none() || self.handle.as_ref().map(|h| h.is_finished()).unwrap_or(true) {
-                if let Err(e) = self.start().await {
-                    if attempt >= max_retries {
-                         return Err(CrawlerError::BrowserError(format!("Failed to start browser: {}", e)).into());
-                    }
-                    eprintln!("Failed to start browser (attempt {}): {}", attempt, e);
-                    tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
-                    continue;
-                }
+            // 1. Ensure browser is ready
+            if let Err(e) = self.ensure_browser_ready(attempt).await {
+                if attempt >= max_retries { return Err(e); }
+                tokio::time::sleep(Duration::from_millis(base_delay * attempt as u64)).await;
+                continue;
             }
 
-            // 2. Clone browser handle and manage session
-            let browser = self.browser.as_ref().unwrap();
-
-            // Handle session creation here (using &mut self)
-            let context_id = if let Some(ref cfg) = config {
-                if let Some(ref session_id) = cfg.session_id {
-                     // Check if session exists
-                     if let Some(id) = self.sessions.get(session_id) {
-                         Some(id.clone())
-                     } else {
-                         // Create new session
-                         // Note: We use the cloned browser handle, so no conflict with &mut self
-                         match browser.create_browser_context(CreateBrowserContextParams::default()).await {
-                             Ok(id) => {
-                                 self.sessions.insert(session_id.clone(), id.clone());
-                                 Some(id)
-                             },
-                             Err(e) => {
-                                 // If session creation fails, it's a browser error
-                                 let err_str = e.to_string();
-                                 if attempt >= max_retries {
-                                     return Err(CrawlerError::BrowserError(format!("Failed to create session: {}", e)).into());
-                                 }
-                                 eprintln!("Failed to create session (attempt {}): {}", attempt, e);
-                                 // If connection failed, invalidate browser
-                                 if err_str.contains("oneshot canceled") || err_str.contains("channel closed") {
-                                     self.browser = None;
-                                 }
-                                 tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
-                                 continue;
-                             }
-                         }
-                     }
-                } else {
-                    None
-                }
-            } else {
-                None
+            // 2. Prepare session
+            // We use a scope here to limit the lifetime of the browser borrow if possible
+            let context_id_result = {
+                let browser = self.browser.as_ref().unwrap();
+                Self::prepare_session(browser, &mut self.sessions, &config).await
             };
 
-            // 3. Perform the crawl logic
-            // From this point on, we don't need &mut self anymore, we use `browser` and `context_id`.
-            // However, we are inside a loop that requires &mut self for the next iteration (start()).
-            // So we can call an async block or function.
-
-            let result: Result<CrawlResult> = async {
-                let page = if let Some(cid) = context_id {
-                    let params = CreateTargetParams::builder()
-                        .url(url)
-                        .browser_context_id(cid)
-                        .build()
-                        .map_err(|e| anyhow!(e))?;
-                    browser.new_page(params).await?
-                } else {
-                    browser.new_page(url).await?
-                };
-
-                page.wait_for_navigation().await?;
-
-                if let Some(ref cfg) = config {
-                    if let Some(ref strategy) = cfg.wait_for {
-                        match strategy {
-                            WaitStrategy::Fixed(ms) => {
-                                tokio::time::sleep(Duration::from_millis(*ms)).await;
-                            },
-                            WaitStrategy::Selector(selector) => {
-                                let timeout = Duration::from_secs(10);
-                                let start = Instant::now();
-                                loop {
-                                    if start.elapsed() > timeout {
-                                        eprintln!("Timeout waiting for selector: {}", selector);
-                                        break;
-                                    }
-                                    match page.find_element(selector).await {
-                                        Ok(_) => break,
-                                        Err(_) => {
-                                            tokio::time::sleep(Duration::from_millis(500)).await;
-                                        }
-                                    }
-                                }
-                            },
-                            WaitStrategy::JsCondition(js) => {
-                                 let timeout = Duration::from_secs(10);
-                                 let start = Instant::now();
-                                 loop {
-                                    if start.elapsed() > timeout {
-                                        eprintln!("Timeout waiting for js condition");
-                                        break;
-                                    }
-                                    match page.evaluate(js.as_str()).await {
-                                        Ok(val) => {
-                                            if let Ok(bool_val) = val.into_value::<bool>() {
-                                                if bool_val {
-                                                    break;
-                                                }
-                                            }
-                                        },
-                                        Err(_) => {}
-                                    }
-                                    tokio::time::sleep(Duration::from_millis(500)).await;
-                                 }
-                            }
-                        }
-                    }
-                }
-
-                let html = page.content().await?;
-
-                let screenshot_data = if let Some(ref cfg) = config {
-                    if cfg.screenshot {
-                        let params = ScreenshotParams::builder()
-                            .format(CaptureScreenshotFormat::Png)
-                            .full_page(true)
-                            .build();
-
-                        match page.screenshot(params).await {
-                            Ok(bytes) => {
-                                use base64::{Engine as _, engine::general_purpose};
-                                Some(general_purpose::STANDARD.encode(bytes))
-                            },
-                            Err(e) => {
-                                eprintln!("Failed to take screenshot: {}", e);
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-                // Extract media and links using JavaScript
-                let script = r#"
-                    (() => {
-                        const resolveUrl = (url) => {
-                            try {
-                                return new URL(url, document.baseURI).href;
-                            } catch (e) {
-                                return url;
-                            }
-                        };
-
-                        const media = {};
-                        const images = Array.from(document.images).map(img => ({
-                            src: resolveUrl(img.src),
-                            alt: img.alt || null,
-                            desc: img.title || null,
-                            score: null,
-                            type: "image",
-                            group_id: null
-                        }));
-                        media["images"] = images;
-
-                        const links = { internal: [], external: [] };
-                        const domain = window.location.hostname;
-
-                        Array.from(document.links).forEach(link => {
-                            const href = resolveUrl(link.href);
-                            const linkObj = {
-                                href: href,
-                                text: link.innerText || null,
-                                title: link.title || null
-                            };
-
-                            try {
-                                const linkUrl = new URL(href);
-                                if (linkUrl.hostname && linkUrl.hostname === domain) {
-                                    links.internal.push(linkObj);
-                                } else {
-                                    links.external.push(linkObj);
-                                }
-                            } catch (e) {
-                                links.external.push(linkObj);
-                            }
-                        });
-
-                        return { media, links };
-                    })()
-                "#;
-
-                let extraction: Option<ExtractionResult> = match page.evaluate(script).await {
-                    Ok(val) => match val.into_value() {
-                        Ok(v) => Some(v),
-                        Err(e) => {
-                            eprintln!("Failed to deserialize extraction result: {:?}", e);
-                            None
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("Failed to evaluate extraction script: {:?}", e);
-                        None
-                    }
-                };
-
-                page.close().await?;
-
-                // Generate Markdown
-                let content_filter = if let Some(ref cfg) = config {
-                    cfg.content_filter.clone().unwrap_or(ContentFilter::Pruning(PruningContentFilter::default()))
-                } else {
-                    ContentFilter::Pruning(PruningContentFilter::default())
-                };
-
-                let generator = DefaultMarkdownGenerator::new(Some(content_filter));
-                let markdown_result = generator.generate_markdown(&html).await;
-
-                let (media, links) = if let Some(ext) = extraction {
-                    (Some(ext.media), Some(ext.links))
-                } else {
-                    (None, None)
-                };
-
-                // Execute extraction strategy if present
-                let extracted_content = if let Some(ref cfg) = config {
-                    if let Some(ref strategy) = cfg.extraction_strategy {
-                         let results = match strategy {
-                             ExtractionStrategyConfig::JsonCss(s) => s.extract(&html),
-                             ExtractionStrategyConfig::JsonXPath(s) => s.extract(&html),
-                             ExtractionStrategyConfig::Regex(s) => s.extract(url, &html),
-                         };
-                         match serde_json::to_string(&results) {
-                             Ok(s) => Some(s),
-                             Err(e) => {
-                                 eprintln!("Failed to serialize extraction results: {}", e);
-                                 None
-                             }
-                         }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-                Ok(CrawlResult {
-                    url: url.to_string(),
-                    html,
-                    success: true,
-                    cleaned_html: None,
-                    media,
-                    links,
-                    screenshot: screenshot_data,
-                    markdown: Some(markdown_result),
-                    extracted_content,
-                    error_message: None,
-                })
-            }.await;
-
-            match result {
-                Ok(res) => return Ok(res),
+            let context_id = match context_id_result {
+                Ok(id) => id,
                 Err(e) => {
                      let err_str = e.to_string();
-                     // Check if it's a fatal browser error
-                     let is_fatal = err_str.contains("oneshot canceled") || err_str.contains("channel closed") || err_str.contains("Broken pipe") || err_str.contains("Connection reset by peer");
+                     if Self::is_fatal_error(&err_str) {
+                         self.reset_browser();
+                     }
+                     if attempt >= max_retries {
+                         return Err(e);
+                     }
+                     eprintln!("Session preparation failed (attempt {}): {}", attempt, e);
+                     tokio::time::sleep(Duration::from_millis(base_delay * attempt as u64)).await;
+                     continue;
+                }
+            };
 
-                     if is_fatal || attempt < max_retries {
+            // 3. Execute Crawl
+            // We need to re-borrow browser here. This is fine because the previous borrow ended after the block?
+            // Wait, context_id_result borrow? No, context_id is Option<BrowserContextId> which is just a String wrapper usually.
+            // Let's check if BrowserContextId borrows anything. It shouldn't.
+
+            let browser = self.browser.as_ref().unwrap();
+            let crawl_result = Self::crawl_page(browser, context_id, url, &config).await;
+
+            match crawl_result {
+                Ok(res) => return Ok(res),
+                Err(e) => {
+                    let err_str = e.to_string();
+                    let is_fatal = Self::is_fatal_error(&err_str);
+
+                    if is_fatal || attempt < max_retries {
                          eprintln!("Crawl error (attempt {}/{}): {}", attempt, max_retries, err_str);
                          if is_fatal {
-                             self.browser = None;
-                             // We should also probably clear sessions, as context IDs are invalid
-                             self.sessions.clear();
+                             self.reset_browser();
                          }
                          if attempt >= max_retries {
                              return Err(e);
                          }
-                         tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
+                         tokio::time::sleep(Duration::from_millis(base_delay * attempt as u64)).await;
                          continue;
-                     }
-                     return Err(e);
+                    }
+                    return Err(e);
                 }
             }
         }
     }
+
+    async fn ensure_browser_ready(&mut self, attempt: u32) -> Result<()> {
+        if self.browser.is_none() || self.handle.as_ref().map(|h| h.is_finished()).unwrap_or(true) {
+            if let Err(e) = self.start().await {
+                eprintln!("Failed to start browser (attempt {}): {}", attempt, e);
+                return Err(CrawlerError::BrowserError(format!("Failed to start browser: {}", e)).into());
+            }
+        }
+        Ok(())
+    }
+
+    fn reset_browser(&mut self) {
+        self.browser = None;
+        self.sessions.clear();
+    }
+
+    fn is_fatal_error(err_str: &str) -> bool {
+        err_str.contains("oneshot canceled") ||
+        err_str.contains("channel closed") ||
+        err_str.contains("Broken pipe") ||
+        err_str.contains("Connection reset by peer")
+    }
+
+    async fn prepare_session(
+        browser: &Browser,
+        sessions: &mut HashMap<String, BrowserContextId>,
+        config: &Option<CrawlerRunConfig>
+    ) -> Result<Option<BrowserContextId>> {
+        if let Some(ref cfg) = config {
+            if let Some(ref session_id) = cfg.session_id {
+                 if let Some(id) = sessions.get(session_id) {
+                     return Ok(Some(id.clone()));
+                 } else {
+                     let id = browser.create_browser_context(CreateBrowserContextParams::default()).await
+                        .map_err(|e| CrawlerError::BrowserError(format!("Failed to create session: {}", e)))?;
+                     sessions.insert(session_id.clone(), id.clone());
+                     return Ok(Some(id));
+                 }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Internal method to perform the actual page visit and extraction.
+    async fn crawl_page(
+        browser: &Browser,
+        context_id: Option<BrowserContextId>,
+        url: &str,
+        config: &Option<CrawlerRunConfig>
+    ) -> Result<CrawlResult> {
+        let page = if let Some(cid) = context_id {
+            let params = CreateTargetParams::builder()
+                .url("about:blank")
+                .browser_context_id(cid)
+                .build()
+                .map_err(|e| anyhow!(e))?;
+            browser.new_page(params).await?
+        } else {
+            browser.new_page("about:blank").await?
+        };
+
+        let navigation_task = page.goto(url);
+        if let Some(timeout_ms) = config.as_ref().and_then(|c| c.page_timeout) {
+             match tokio::time::timeout(Duration::from_millis(timeout_ms), navigation_task).await {
+                 Ok(res) => { res?; },
+                 Err(_) => return Err(CrawlerError::Timeout("Page navigation timed out".to_string()).into()),
+             }
+        } else {
+             navigation_task.await?;
+        }
+
+        if let Some(ref cfg) = config {
+            if let Some(ref strategy) = cfg.wait_for {
+                match strategy {
+                    WaitStrategy::Fixed(ms) => {
+                        tokio::time::sleep(Duration::from_millis(*ms)).await;
+                    },
+                    WaitStrategy::Selector(selector) => {
+                        let timeout = Duration::from_secs(10);
+                        let start = Instant::now();
+                        loop {
+                            if start.elapsed() > timeout {
+                                eprintln!("Timeout waiting for selector: {}", selector);
+                                break;
+                            }
+                            match page.find_element(selector).await {
+                                Ok(_) => break,
+                                Err(_) => {
+                                    tokio::time::sleep(Duration::from_millis(500)).await;
+                                }
+                            }
+                        }
+                    },
+                    WaitStrategy::JsCondition(js) => {
+                         let timeout = Duration::from_secs(10);
+                         let start = Instant::now();
+                         loop {
+                            if start.elapsed() > timeout {
+                                eprintln!("Timeout waiting for js condition");
+                                break;
+                            }
+                            match page.evaluate(js.as_str()).await {
+                                Ok(val) => {
+                                    if let Ok(bool_val) = val.into_value::<bool>() {
+                                        if bool_val {
+                                            break;
+                                        }
+                                    }
+                                },
+                                Err(_) => {}
+                            }
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                         }
+                    }
+                }
+            }
+        }
+
+        let html = page.content().await?;
+
+        let screenshot_data = if let Some(ref cfg) = config {
+            if cfg.screenshot {
+                let params = ScreenshotParams::builder()
+                    .format(CaptureScreenshotFormat::Png)
+                    .full_page(true)
+                    .build();
+
+                match page.screenshot(params).await {
+                    Ok(bytes) => {
+                        use base64::{Engine as _, engine::general_purpose};
+                        Some(general_purpose::STANDARD.encode(bytes))
+                    },
+                    Err(e) => {
+                        eprintln!("Failed to take screenshot: {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Extract media and links using JavaScript
+        let script = r#"
+            (() => {
+                const resolveUrl = (url) => {
+                    try {
+                        return new URL(url, document.baseURI).href;
+                    } catch (e) {
+                        return url;
+                    }
+                };
+
+                const media = {};
+                const images = Array.from(document.images).map(img => ({
+                    src: resolveUrl(img.src),
+                    alt: img.alt || null,
+                    desc: img.title || null,
+                    score: null,
+                    type: "image",
+                    group_id: null
+                }));
+                media["images"] = images;
+
+                const links = { internal: [], external: [] };
+                const domain = window.location.hostname;
+
+                Array.from(document.links).forEach(link => {
+                    const href = resolveUrl(link.href);
+                    const linkObj = {
+                        href: href,
+                        text: link.innerText || null,
+                        title: link.title || null
+                    };
+
+                    try {
+                        const linkUrl = new URL(href);
+                        if (linkUrl.hostname && linkUrl.hostname === domain) {
+                            links.internal.push(linkObj);
+                        } else {
+                            links.external.push(linkObj);
+                        }
+                    } catch (e) {
+                        links.external.push(linkObj);
+                    }
+                });
+
+                return { media, links };
+            })()
+        "#;
+
+        let extraction: Option<ExtractionResult> = match page.evaluate(script).await {
+            Ok(val) => match val.into_value() {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    eprintln!("Failed to deserialize extraction result: {:?}", e);
+                    None
+                }
+            },
+            Err(e) => {
+                eprintln!("Failed to evaluate extraction script: {:?}", e);
+                None
+            }
+        };
+
+        page.close().await?;
+
+        // Generate Markdown
+        let content_filter = if let Some(ref cfg) = config {
+            cfg.content_filter.clone().unwrap_or(ContentFilter::Pruning(PruningContentFilter::default()))
+        } else {
+            ContentFilter::Pruning(PruningContentFilter::default())
+        };
+
+        let generator = DefaultMarkdownGenerator::new(Some(content_filter));
+        let markdown_result = generator.generate_markdown(&html).await;
+
+        let (media, links) = if let Some(ext) = extraction {
+            (Some(ext.media), Some(ext.links))
+        } else {
+            (None, None)
+        };
+
+        // Execute extraction strategy if present
+        let extracted_content = if let Some(ref cfg) = config {
+            if let Some(ref strategy) = cfg.extraction_strategy {
+                 let results = match strategy {
+                     ExtractionStrategyConfig::JsonCss(s) => s.extract(&html),
+                     ExtractionStrategyConfig::JsonXPath(s) => s.extract(&html),
+                     ExtractionStrategyConfig::Regex(s) => s.extract(url, &html),
+                 };
+                 match serde_json::to_string(&results) {
+                     Ok(s) => Some(s),
+                     Err(e) => {
+                         eprintln!("Failed to serialize extraction results: {}", e);
+                         None
+                     }
+                 }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(CrawlResult {
+            url: url.to_string(),
+            html,
+            success: true,
+            cleaned_html: None,
+            media,
+            links,
+            screenshot: screenshot_data,
+            markdown: Some(markdown_result),
+            extracted_content,
+            error_message: None,
+        })
+    }
 }
 
 /// Generic retry logic with exponential backoff.
-///
-/// # Arguments
-///
-/// * `operation` - A closure that returns a `Result`.
-/// * `max_retries` - Maximum number of retries.
-/// * `base_delay` - Base delay in milliseconds for backoff.
 #[allow(dead_code)]
-async fn retry_with_backoff<F, Fut, T>(
+pub async fn retry_with_backoff<F, Fut, T, E>(
     mut operation: F,
     max_retries: u32,
     base_delay: u64,
 ) -> Result<T>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T>>,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display + std::fmt::Debug,
+    anyhow::Error: From<E>,
 {
     let mut attempt = 0;
     loop {
@@ -470,22 +471,10 @@ where
             Ok(val) => return Ok(val),
             Err(e) => {
                 if attempt > max_retries {
-                    return Err(e);
+                    return Err(anyhow::Error::from(e));
                 }
 
-                let err_str = e.to_string();
-                // Check if it's a fatal error that shouldn't be retried?
-                // For now, we assume the caller handles fatal errors inside the operation
-                // or we can inspect here.
-                // But specifically for this generic function, we retry on all errors unless
-                // we want to add a predicate.
-                // However, the original logic had specific checks for "oneshot canceled" etc.
-                // to decide whether to restart the browser. That logic is stateful.
-                // So this generic retry might just be for the "try again" part.
-
-                // Let's keep it simple: retry on everything up to max_retries.
-
-                eprintln!("Operation failed (attempt {}/{}): {}", attempt, max_retries, err_str);
+                eprintln!("Operation failed (attempt {}/{}): {}", attempt, max_retries, e);
                 tokio::time::sleep(Duration::from_millis(base_delay * attempt as u64)).await;
             }
         }
