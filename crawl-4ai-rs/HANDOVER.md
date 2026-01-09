@@ -5,36 +5,27 @@
 
 ## Current State
 - **Core Crawler**: Implemented `AsyncWebCrawler` using `chromiumoxide`.
-- **Error Handling**: Implemented `CrawlerError` and robust retry logic (embedded in `arun`).
-- **Content Filtering**:
-    - `PruningContentFilter` (DOM pruning).
-    - `BM25ContentFilter` (Text ranking).
-    - `LLMContentFilter` (LLM-based filtering/summarization).
-- **Extraction Strategies**:
-    - `JsonCssExtractionStrategy`: CSS selector based extraction.
-    - `RegexExtractionStrategy`: Regex based extraction (with caching).
-    - `JsonXPathExtractionStrategy`: XPath based extraction.
-    - **CLI Support**: Added `--extraction-config` to pass strategies via JSON file.
-- **Markdown Generation**: `async` implementation.
-- **Session Management**: Implemented.
-- **CLI**: Implemented in `src/main.rs`.
-- **Documentation**: Added doc comments to `src/crawler.rs`, `src/models.rs`, and `src/extraction_strategy.rs`.
+- **Error Handling & Retry**: Refactored `arun` to use a cleaner loop with explicit state management and timeout support. Added `page_timeout` configuration.
+- **Testing**: Added integration tests for retry logic (`tests/test_retry_integration.rs`) simulating network delays/timeouts.
+- **Content Filtering**: Pruning, BM25, LLM implemented.
+- **Extraction Strategies**: CSS, XPath, Regex implemented.
+- **CLI**: Implemented.
 
 ## Recent Changes
-- **CLI Extraction Strategy**: Added support for running extraction strategies via the CLI using `--extraction-config`.
-- **Regex Strategy Optimization**: Optimized `RegexExtractionStrategy` to cache compiled regexes.
-- **Integration**: `AsyncWebCrawler` now executes the configured extraction strategy and returns the result in `extracted_content`.
+- **Refactored `arun`**: Extracted `crawl_page` and `prepare_session` methods to separate concerns and handle borrow checker constraints cleanly.
+- **Retry Logic**: Verified and tested retry logic with `wiremock` integration tests. The crawler now correctly retries on timeouts and navigates safely using `page.goto()` instead of relying on implicit `wait_for_navigation`.
+- **Timeout Configuration**: Added `page_timeout` to `CrawlerRunConfig`.
 
 ## Next Steps for the Next Agent (The "Heavy" Tasks)
-1.  **Refactor Retry Logic**:
-    -   The retry logic is currently embedded in the `arun` loop. Extracting it into a testable, generic policy (like `retry_with_backoff`) is highly desired to allow unit testing without spinning up a full browser. A previous attempt was made but reverted due to complexity in `arun`.
-2.  **Advanced Retry Testing**:
-    -   Implement integration tests that simulate network failures (e.g., using a proxy or mock server that drops connections) to verify the crawler recovers.
-3.  **Performance Tuning**:
+1.  **Performance Tuning**:
     -   Benchmark `JsonXPathExtractionStrategy` vs `JsonCssExtractionStrategy` on large DOMs.
     -   Analyze memory usage during long crawls.
-4.  **Wait Strategy Improvements**:
-    -   The current `WaitStrategy` implementation is basic. Consider adding more sophisticated waiting conditions (e.g., network idle).
+2.  **Wait Strategy Improvements**:
+    -   The current `WaitStrategy` implementation is basic. Consider adding more sophisticated waiting conditions (e.g., network idle, specific network request completion).
+3.  **Headless Shell vs Full Chrome**:
+    -   Investigate if `chromiumoxide` can run with the lighter `headless_shell` binary for better performance in Docker/Cloud environments.
+4.  **Error Handling Granularity**:
+    -   Currently, `arun` retries on most errors. Consider categorizing errors better (e.g., 404 Not Found should probably not be retried unless configured, while 500 or Timeouts should be).
 
 ## CLI Usage
 ```bash
@@ -48,3 +39,4 @@ cargo run --bin crawl4ai -- https://example.com --extraction-config my_strategy.
 ## Technical Notes
 - **Testing**: Run tests with `cargo test -- --test-threads=1`.
 - **Chrome Executable**: Set `CHROME_EXECUTABLE` if `chromiumoxide` cannot find your browser.
+- **Environment**: If running in a container or new env, ensure `playwright install` or similar has set up the browser binaries.
