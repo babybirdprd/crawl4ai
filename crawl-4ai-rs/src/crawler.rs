@@ -15,20 +15,36 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use thiserror::Error;
 
+/// Errors that can occur during the crawling process.
 #[derive(Error, Debug)]
 pub enum CrawlerError {
+    /// Error related to the browser instance or connection.
     #[error("Browser error: {0}")]
     BrowserError(String),
+    /// Error occurring during page navigation.
     #[error("Navigation error: {0}")]
     NavigationError(String),
+    /// Timeout error when waiting for a condition (selector, JS).
     #[error("Timeout waiting for {0}")]
     Timeout(String),
+    /// Error during content extraction.
     #[error("Extraction error: {0}")]
     ExtractionError(String),
+    /// Other miscellaneous errors.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
+/// An asynchronous web crawler based on `chromiumoxide`.
+///
+/// This struct manages the browser instance, sessions, and the crawling process.
+/// It supports features like:
+/// - Headless crawling
+/// - Session management (persistent contexts)
+/// - Markdown generation
+/// - Content filtering (Pruning, BM25, LLM)
+/// - Screenshot capture
+/// - JavaScript execution for extraction
 #[derive(Default)]
 pub struct AsyncWebCrawler {
     browser: Option<Browser>,
@@ -43,6 +59,7 @@ struct ExtractionResult {
 }
 
 impl AsyncWebCrawler {
+    /// Creates a new instance of `AsyncWebCrawler`.
     pub fn new() -> Self {
         Self {
             browser: None,
@@ -51,6 +68,11 @@ impl AsyncWebCrawler {
         }
     }
 
+    /// Starts the browser instance.
+    ///
+    /// This method launches a headless Chromium instance. It attempts to locate the
+    /// Chrome executable automatically or uses the `CHROME_EXECUTABLE` environment variable.
+    /// It also spawns a background task to handle browser events.
     pub async fn start(&mut self) -> Result<()> {
         if self.browser.is_some() {
             // Check if the handler is still running
@@ -114,6 +136,21 @@ impl AsyncWebCrawler {
         Ok(())
     }
 
+    /// Asynchronously crawls a URL with the given configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The URL to crawl.
+    /// * `config` - Optional configuration for the crawl run (wait strategies, content filters, etc.).
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing `CrawlResult` on success, or an error.
+    ///
+    /// # Retry Logic
+    ///
+    /// This method includes a retry mechanism (up to 3 attempts) for handling transient
+    /// errors like browser startup failures or session creation issues.
     pub async fn arun(&mut self, url: &str, config: Option<CrawlerRunConfig>) -> Result<CrawlResult> {
         let max_retries = 3;
         let mut attempt = 0;
