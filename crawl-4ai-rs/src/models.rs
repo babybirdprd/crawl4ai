@@ -11,8 +11,12 @@ pub enum WaitStrategy {
     Fixed(u64),
     /// Wait for a CSS selector to appear in the DOM.
     Selector(String),
+    /// Wait for an XPath to appear in the DOM.
+    XPath(String),
     /// Wait for a JavaScript condition to evaluate to true.
     JsCondition(String),
+    /// Wait for network to be idle (no active requests for 500ms).
+    NetworkIdle,
 }
 
 /// Configuration for extraction strategy.

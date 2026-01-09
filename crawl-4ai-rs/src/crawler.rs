@@ -1,5 +1,6 @@
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::target::{CreateBrowserContextParams, CreateTargetParams};
+use chromiumoxide::cdp::browser_protocol::network::{self, EventRequestWillBeSent, EventLoadingFinished, EventLoadingFailed};
 use chromiumoxide::cdp::browser_protocol::browser::BrowserContextId;
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::page::ScreenshotParams;
@@ -262,13 +263,14 @@ impl AsyncWebCrawler {
 
         if let Some(ref cfg) = config {
             if let Some(ref strategy) = cfg.wait_for {
+                let timeout = Duration::from_secs(10); // TODO: Make configurable
+                let start = Instant::now();
+
                 match strategy {
                     WaitStrategy::Fixed(ms) => {
                         tokio::time::sleep(Duration::from_millis(*ms)).await;
                     },
                     WaitStrategy::Selector(selector) => {
-                        let timeout = Duration::from_secs(10);
-                        let start = Instant::now();
                         loop {
                             if start.elapsed() > timeout {
                                 eprintln!("Timeout waiting for selector: {}", selector);
@@ -282,9 +284,35 @@ impl AsyncWebCrawler {
                             }
                         }
                     },
+                    WaitStrategy::XPath(xpath) => {
+                         // Escape backslashes first, then quotes to prevent injection issues
+                         let escaped_xpath = xpath.replace("\\", "\\\\").replace("\"", "\\\"");
+                         let js = format!(
+                             r#"
+                             (() => {{
+                                 const result = document.evaluate("{}", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                                 return result.singleNodeValue !== null;
+                             }})()
+                             "#,
+                             escaped_xpath
+                         );
+                         loop {
+                            if start.elapsed() > timeout {
+                                eprintln!("Timeout waiting for xpath: {}", xpath);
+                                break;
+                            }
+                            match page.evaluate(js.as_str()).await {
+                                Ok(val) => {
+                                    if let Ok(true) = val.into_value::<bool>() {
+                                        break;
+                                    }
+                                },
+                                Err(_) => {}
+                            }
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                        }
+                    },
                     WaitStrategy::JsCondition(js) => {
-                         let timeout = Duration::from_secs(10);
-                         let start = Instant::now();
                          loop {
                             if start.elapsed() > timeout {
                                 eprintln!("Timeout waiting for js condition");
@@ -292,16 +320,66 @@ impl AsyncWebCrawler {
                             }
                             match page.evaluate(js.as_str()).await {
                                 Ok(val) => {
-                                    if let Ok(bool_val) = val.into_value::<bool>() {
-                                        if bool_val {
-                                            break;
-                                        }
+                                    if let Ok(true) = val.into_value::<bool>() {
+                                        break;
                                     }
                                 },
                                 Err(_) => {}
                             }
                             tokio::time::sleep(Duration::from_millis(500)).await;
                          }
+                    },
+                    WaitStrategy::NetworkIdle => {
+                        if let Err(e) = page.execute(network::EnableParams::default()).await {
+                             eprintln!("Failed to enable network domain for idle wait: {}", e);
+                        } else {
+                            // Note: This implementation only tracks requests initiated AFTER this point.
+                            // In-flight requests started before this block are not counted.
+                            let request_sent = page.event_listener::<EventRequestWillBeSent>().await;
+                            let request_finished = page.event_listener::<EventLoadingFinished>().await;
+                            let request_failed = page.event_listener::<EventLoadingFailed>().await;
+
+                            if let (Ok(mut request_sent), Ok(mut request_finished), Ok(mut request_failed)) =
+                                (request_sent, request_finished, request_failed)
+                            {
+                                let mut active_requests = 0;
+                                let mut last_activity = Instant::now();
+                                let idle_time = Duration::from_millis(500);
+                                let max_wait = Duration::from_secs(30);
+                                let start_wait = Instant::now();
+
+                                loop {
+                                    if start_wait.elapsed() > max_wait {
+                                        eprintln!("Timeout waiting for network idle");
+                                        break;
+                                    }
+
+                                    if active_requests == 0 && last_activity.elapsed() > idle_time {
+                                        break;
+                                    }
+
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                                            // Periodic check
+                                        }
+                                        Some(_) = request_sent.next() => {
+                                            active_requests += 1;
+                                            last_activity = Instant::now();
+                                        }
+                                        Some(_) = request_finished.next() => {
+                                            if active_requests > 0 { active_requests -= 1; }
+                                            last_activity = Instant::now();
+                                        }
+                                        Some(_) = request_failed.next() => {
+                                            if active_requests > 0 { active_requests -= 1; }
+                                            last_activity = Instant::now();
+                                        }
+                                    }
+                                }
+                            } else {
+                                eprintln!("Failed to attach event listeners for network idle");
+                            }
+                        }
                     }
                 }
             }
