@@ -174,6 +174,20 @@ impl AsyncWebCrawler {
             match crawl_result {
                 Ok(res) => return Ok(res),
                 Err(e) => {
+                    // Check if it's a 404 error
+                    if let Some(CrawlerError::HttpStatusCode(code)) = e.downcast_ref::<CrawlerError>() {
+                        if *code == 404 {
+                            let retry = if let Some(ref cfg) = config {
+                                cfg.retry_404
+                            } else {
+                                false
+                            };
+                            if !retry {
+                                return Err(e);
+                            }
+                        }
+                    }
+
                     let err_str = e.to_string();
                     let is_fatal = Self::is_fatal_error(&err_str);
 
@@ -266,7 +280,14 @@ impl AsyncWebCrawler {
         };
 
         // Attempt to get the response regardless of goto success
-        let response = response_task.await;
+        // Use a timeout to prevent infinite hang if goto timed out/failed and no response came.
+        let response = match tokio::time::timeout(Duration::from_secs(2), response_task).await {
+            Ok(res) => res,
+            Err(_) => {
+                // If response task times out, we rely on goto_result for error
+                Ok(None)
+            }
+        };
 
         // Check response first for status codes
         if let Ok(Some(req)) = response {
