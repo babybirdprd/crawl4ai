@@ -32,7 +32,7 @@
 ## Known Issues
 - **Headless 404 Handling**: In the current test environment (headless Chromium + wiremock), returning a 404 with an empty body causes `chromiumoxide` to fail navigation with `net::ERR_HTTP_RESPONSE_CODE_FAILURE` before the response event is fully processed by `wait_for_navigation_response` in some cases. This makes it difficult to distinguish 404 from other protocol errors in tests. However, the logic handles explicit 404s correctly if detected.
 
-## Next Steps for the Next Agent
+## Next Steps for the Agent
 1.  **Performance Tuning**:
     -   Benchmark `JsonXPathExtractionStrategy` vs `JsonCssExtractionStrategy` on large DOMs.
     -   Analyze memory usage during long crawls.
@@ -41,6 +41,8 @@
 3.  **Error Handling Granularity**:
     -   Investigate better ways to extract status codes from `chromiumoxide` errors when navigation fails completely.
     -   Consider parsing the `net::ERR_...` strings if necessary.
+4. **Documentation**:
+    -   Create extensive end user documentation for using the port (Just as thorough as the original)
 
 ## CLI Usage
 ```bash
