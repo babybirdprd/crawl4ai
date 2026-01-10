@@ -16,7 +16,11 @@ pub enum WaitStrategy {
     /// Wait for a JavaScript condition to evaluate to true.
     JsCondition(String),
     /// Wait for network to be idle (no active requests for 500ms).
-    NetworkIdle,
+    NetworkIdle {
+        /// Time in milliseconds for the network to be idle (default: 500ms).
+        #[serde(default)]
+        idle_time: Option<u64>,
+    },
 }
 
 /// Configuration for extraction strategy.
@@ -47,6 +51,8 @@ pub struct CrawlerRunConfig {
     pub screenshot: bool,
     /// Timeout for page navigation in milliseconds.
     pub page_timeout: Option<u64>,
+    /// Timeout for the wait strategy in milliseconds (default: 10000ms).
+    pub wait_timeout: Option<u64>,
 }
 
 /// Result of a crawl operation.

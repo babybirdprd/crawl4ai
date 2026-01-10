@@ -263,7 +263,8 @@ impl AsyncWebCrawler {
 
         if let Some(ref cfg) = config {
             if let Some(ref strategy) = cfg.wait_for {
-                let timeout = Duration::from_secs(10); // TODO: Make configurable
+                let timeout_ms = cfg.wait_timeout.unwrap_or(10_000);
+                let timeout = Duration::from_millis(timeout_ms);
                 let start = Instant::now();
 
                 match strategy {
@@ -329,7 +330,7 @@ impl AsyncWebCrawler {
                             tokio::time::sleep(Duration::from_millis(500)).await;
                          }
                     },
-                    WaitStrategy::NetworkIdle => {
+                    WaitStrategy::NetworkIdle { idle_time } => {
                         if let Err(e) = page.execute(network::EnableParams::default()).await {
                              eprintln!("Failed to enable network domain for idle wait: {}", e);
                         } else {
@@ -344,17 +345,16 @@ impl AsyncWebCrawler {
                             {
                                 let mut active_requests = 0;
                                 let mut last_activity = Instant::now();
-                                let idle_time = Duration::from_millis(500);
-                                let max_wait = Duration::from_secs(30);
+                                let required_idle_time = Duration::from_millis(idle_time.unwrap_or(500));
                                 let start_wait = Instant::now();
 
                                 loop {
-                                    if start_wait.elapsed() > max_wait {
+                                    if start_wait.elapsed() > timeout {
                                         eprintln!("Timeout waiting for network idle");
                                         break;
                                     }
 
-                                    if active_requests == 0 && last_activity.elapsed() > idle_time {
+                                    if active_requests == 0 && last_activity.elapsed() > required_idle_time {
                                         break;
                                     }
 
