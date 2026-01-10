@@ -6,22 +6,29 @@
 ## Current State
 - **Core Crawler**: Implemented `AsyncWebCrawler` using `chromiumoxide`.
 - **Error Handling & Retry**: Refactored `arun` to use a cleaner loop with explicit state management and timeout support. Added `page_timeout` configuration.
+- **Wait Strategies**:
+    -   Implemented `XPath` wait strategy (via `document.evaluate`).
+    -   Implemented `NetworkIdle` wait strategy (via CDP event listeners). Note: `NetworkIdle` only tracks requests initiated *after* the strategy starts waiting.
+    -   Refactored `Selector` and `JsCondition` strategies.
 - **Testing**: Added integration tests for retry logic (`tests/test_retry_integration.rs`) simulating network delays/timeouts.
 - **Content Filtering**: Pruning, BM25, LLM implemented.
 - **Extraction Strategies**: CSS, XPath, Regex implemented.
 - **CLI**: Implemented.
 
 ## Recent Changes
-- **Refactored `arun`**: Extracted `crawl_page` and `prepare_session` methods to separate concerns and handle borrow checker constraints cleanly.
-- **Retry Logic**: Verified and tested retry logic with `wiremock` integration tests. The crawler now correctly retries on timeouts and navigates safely using `page.goto()` instead of relying on implicit `wait_for_navigation`.
-- **Timeout Configuration**: Added `page_timeout` to `CrawlerRunConfig`.
+- **Wait Strategy Improvements**:
+    -   Added `XPath` support to `WaitStrategy`.
+    -   Added `NetworkIdle` support to `WaitStrategy`.
+    -   Improved `Selector` and `JsCondition` timeout handling (though still hardcoded to 10s internally, marked with TODO).
+    -   Added escaping for XPath strings to prevent injection/syntax errors.
 
-## Next Steps for the Next Agent (The "Heavy" Tasks)
+## Next Steps for the Next Agent
 1.  **Performance Tuning**:
     -   Benchmark `JsonXPathExtractionStrategy` vs `JsonCssExtractionStrategy` on large DOMs.
     -   Analyze memory usage during long crawls.
-2.  **Wait Strategy Improvements**:
-    -   The current `WaitStrategy` implementation is basic. Consider adding more sophisticated waiting conditions (e.g., network idle, specific network request completion).
+2.  **Configuration Refinement**:
+    -   Expose the timeout for `WaitStrategy` in `CrawlerRunConfig` (currently hardcoded to 10s or 30s).
+    -   Add configuration for `NetworkIdle` duration (currently 500ms).
 3.  **Headless Shell vs Full Chrome**:
     -   Investigate if `chromiumoxide` can run with the lighter `headless_shell` binary for better performance in Docker/Cloud environments.
 4.  **Error Handling Granularity**:
