@@ -14,35 +14,40 @@
 - **Testing**:
     -   Integration tests for retry logic (`tests/test_retry_integration.rs`).
     -   Integration tests for wait strategies (`tests/test_wait_strategies.rs`).
-- **Content Filtering**: Pruning, BM25, LLM implemented.
+- **Content Filtering**: Pruning, BM25, basic LLM (placeholder) implemented.
 - **Extraction Strategies**: CSS, XPath, Regex implemented.
 - **CLI**: Implemented.
 
 ## Recent Changes
 - **Configuration Refinement**:
-    -   Exposed `wait_timeout` in `CrawlerRunConfig` to control the maximum wait time for all strategies.
-    -   Updated `WaitStrategy::NetworkIdle` to accept an optional `idle_time` parameter for configuring the required idle duration.
-    -   Updated `AsyncWebCrawler` to respect these new configuration values.
+    -   Exposed `wait_timeout` in `CrawlerRunConfig`.
+    -   Updated `WaitStrategy::NetworkIdle` to accept an optional `idle_time`.
 - **Retry Logic Enhancement**:
-    -   Added `retry_404` to `CrawlerRunConfig` (default: false).
-    -   Modified `CrawlerError` to include `HttpStatusCode(i64)`.
-    -   Updated `crawl_page` to robustly detect HTTP status codes using `wait_for_navigation_response` and correctly propagate 404s as `HttpStatusCode(404)`.
-    -   Updated `arun` loop to respect `retry_404` setting: it will abort retries if a 404 is detected and `retry_404` is false.
+    -   Added `retry_404` to `CrawlerRunConfig`.
+    -   Improved 404 detection and propagation.
+- **Performance Benchmarking**:
+    -   Benchmarked `JsonCssExtractionStrategy` vs `JsonXPathExtractionStrategy`.
+    -   **Result**: CSS extraction is ~2.65x faster than XPath extraction on large DOMs (3.5MB, 5000 items).
+    -   *Recommendation*: Prefer CSS selectors for performance-critical extraction where possible.
 
 ## Known Issues
-- **Headless 404 Handling**: In the current test environment (headless Chromium + wiremock), returning a 404 with an empty body causes `chromiumoxide` to fail navigation with `net::ERR_HTTP_RESPONSE_CODE_FAILURE` before the response event is fully processed by `wait_for_navigation_response` in some cases. This makes it difficult to distinguish 404 from other protocol errors in tests. However, the logic handles explicit 404s correctly if detected.
+- **Headless 404 Handling**: In the current test environment (headless Chromium + wiremock), returning a 404 with an empty body causes `chromiumoxide` to fail navigation with `net::ERR_HTTP_RESPONSE_CODE_FAILURE`.
 
-## Next Steps for the Agent
-1.  **Performance Tuning**:
-    -   Benchmark `JsonXPathExtractionStrategy` vs `JsonCssExtractionStrategy` on large DOMs.
-    -   Analyze memory usage during long crawls.
+## Next Steps for the Agent (CRITICAL)
+1.  **Implement `rig` for LLM Support**:
+    -   The current `LLMContentFilter` is a basic placeholder. You must **implement `rig`** (likely the `rig-core` crate or similar Rust LLM framework) to properly architecture the LLM functionality.
+    -   **Support Multiple Providers**: The implementation must support multiple LLM providers (OpenAI, Anthropic, local models, etc.) via `rig`.
+    -   **Port Actual Functionality**: Start porting the robust LLM features from the original Python project.
+    -   *Note*: This is a heavy workload. Do not cut corners. The goal is a production-ready LLM integration.
+
 2.  **Headless Shell vs Full Chrome**:
-    -   Investigate if `chromiumoxide` can run with the lighter `headless_shell` binary for better performance in Docker/Cloud environments.
+    -   Investigate if `chromiumoxide` can run with the lighter `headless_shell` binary.
+
 3.  **Error Handling Granularity**:
     -   Investigate better ways to extract status codes from `chromiumoxide` errors when navigation fails completely.
-    -   Consider parsing the `net::ERR_...` strings if necessary.
+
 4. **Documentation**:
-    -   Create extensive end user documentation for using the port (Just as thorough as the original)
+    -   Create extensive end user documentation for using the port.
 
 ## CLI Usage
 ```bash
@@ -56,4 +61,3 @@ cargo run --bin crawl4ai -- https://example.com --extraction-config my_strategy.
 ## Technical Notes
 - **Testing**: Run tests with `cargo test -- --test-threads=1`.
 - **Chrome Executable**: Set `CHROME_EXECUTABLE` if `chromiumoxide` cannot find your browser.
-- **Environment**: If running in a container or new env, ensure `playwright install` or similar has set up the browser binaries.
