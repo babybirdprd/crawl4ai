@@ -53,6 +53,9 @@ pub struct CrawlerRunConfig {
     pub page_timeout: Option<u64>,
     /// Timeout for the wait strategy in milliseconds (default: 10000ms).
     pub wait_timeout: Option<u64>,
+    /// Whether to retry on 404 errors (default: false).
+    #[serde(default)]
+    pub retry_404: bool,
 }
 
 /// Result of a crawl operation.
