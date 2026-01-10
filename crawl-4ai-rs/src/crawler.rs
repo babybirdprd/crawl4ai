@@ -31,6 +31,9 @@ pub enum CrawlerError {
     /// Error during content extraction.
     #[error("Extraction error: {0}")]
     ExtractionError(String),
+    /// HTTP Status Code Error
+    #[error("HTTP Error: {0}")]
+    HttpStatusCode(i64),
     /// Other miscellaneous errors.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -251,14 +254,36 @@ impl AsyncWebCrawler {
             browser.new_page("about:blank").await?
         };
 
-        let navigation_task = page.goto(url);
-        if let Some(timeout_ms) = config.as_ref().and_then(|c| c.page_timeout) {
-             match tokio::time::timeout(Duration::from_millis(timeout_ms), navigation_task).await {
-                 Ok(res) => { res?; },
-                 Err(_) => return Err(CrawlerError::Timeout("Page navigation timed out".to_string()).into()),
+        let response_task = page.wait_for_navigation_response();
+
+        let goto_result = if let Some(timeout_ms) = config.as_ref().and_then(|c| c.page_timeout) {
+             match tokio::time::timeout(Duration::from_millis(timeout_ms), page.goto(url)).await {
+                 Ok(res) => res.map(|_| ()).map_err(|e| e.into()),
+                 Err(_) => Err(CrawlerError::Timeout("Page navigation timed out".to_string()).into()),
              }
         } else {
-             navigation_task.await?;
+             page.goto(url).await.map(|_| ()).map_err(|e| e.into())
+        };
+
+        // Attempt to get the response regardless of goto success
+        let response = response_task.await;
+
+        // Check response first for status codes
+        if let Ok(Some(req)) = response {
+            if let Some(resp) = req.response.as_ref() {
+                if resp.status == 404 {
+                    return Err(CrawlerError::HttpStatusCode(404).into());
+                }
+                if resp.status >= 400 {
+                    eprintln!("Page returned status: {}", resp.status);
+                    return Err(CrawlerError::HttpStatusCode(resp.status).into());
+                }
+            }
+        }
+
+        // If no status error, check if goto failed
+        if let Err(e) = goto_result {
+            return Err(e);
         }
 
         if let Some(ref cfg) = config {
