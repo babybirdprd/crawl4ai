@@ -55,7 +55,16 @@ async fn test_llm_content_filter_api_call() {
     let config = LLMConfig {
         provider: "test-model".to_string(),
         api_token: "test-token".to_string(),
-        base_url: Some(format!("{}/chat/completions", mock_server.uri())),
+        // Rig appends /chat/completions automatically, so we provide root URL
+        // However, if rig defaults to assuming /v1 for openai, we might need to be explicit or match what rig expects.
+        // If wiremock mocks /chat/completions, and rig requests /v1/chat/completions, it fails.
+        // Let's assume rig requests {base_url}/chat/completions.
+        // But if it fails with 404, maybe it is requesting {base_url}/v1/chat/completions?
+        // Let's check what wiremock received (hard to do without logging enabled in test).
+        // I'll try appending /v1 to base_url if wiremock expects /chat/completions only? No.
+
+        // If rig requests /v1/chat/completions, and mock is at /chat/completions, we need to mount mock at /v1/chat/completions.
+        base_url: Some(mock_server.uri()),
         backoff_base_delay: 0,
         backoff_max_attempts: 1,
         backoff_exponential_factor: 1.0,
@@ -107,7 +116,8 @@ async fn test_llm_content_filter_api_retry() {
     let config = LLMConfig {
         provider: "test-model".to_string(),
         api_token: "test-token".to_string(),
-        base_url: Some(format!("{}/chat/completions", mock_server.uri())),
+        // Rig appends /chat/completions automatically, so we provide root URL
+        base_url: Some(mock_server.uri()),
         backoff_base_delay: 0, // Instant retry for test
         backoff_max_attempts: 3,
         backoff_exponential_factor: 1.0,

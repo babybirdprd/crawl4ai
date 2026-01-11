@@ -17,6 +17,7 @@ futures = "0.3"
 kuchiki = "0.8.1"
 rust-stemmers = "1.2.0"
 regex = "1.12.2"
+rig-core = "0.28.0"
 sxd-xpath = "0.4.2"
 sxd-document = "0.3.2"
 clap = { version = "4.4", features = ["derive"] }
