@@ -5,48 +5,43 @@
 
 ## Current State
 - **Core Crawler**: Implemented `AsyncWebCrawler` using `chromiumoxide`.
-- **Error Handling & Retry**: Refactored `arun` to use a cleaner loop with explicit state management and timeout support. Added `page_timeout` configuration.
+- **LLM Support**:
+    -   Integrated `rig-core` crate for LLM interaction.
+    -   Refactored `LLMContentFilter` to use `rig` providers (specifically OpenAI).
+    -   Optimized `LLMContentFilter` to reuse the `rig` Agent across parallel chunks.
+- **Error Handling & Retry**: Refactored `arun` to use a cleaner loop with explicit state management and timeout support.
 - **Wait Strategies**:
-    -   Implemented `XPath`, `Selector`, `JsCondition` wait strategies.
-    -   Implemented `NetworkIdle` wait strategy.
-    -   All strategies now support configurable timeouts via `CrawlerRunConfig::wait_timeout` (default 10s).
-    -   `NetworkIdle` supports configurable idle duration (default 500ms).
+    -   Implemented `XPath`, `Selector`, `JsCondition`, `NetworkIdle` wait strategies.
 - **Testing**:
     -   Integration tests for retry logic (`tests/test_retry_integration.rs`).
     -   Integration tests for wait strategies (`tests/test_wait_strategies.rs`).
-- **Content Filtering**: Pruning, BM25, basic LLM (placeholder) implemented.
-- **Extraction Strategies**: CSS, XPath, Regex implemented.
-- **CLI**: Implemented.
+    -   **Unit Tests for LLM**: `tests/test_llm_filter.rs` exists but currently fails with 404 errors due to URL path mismatch between `rig` client defaults and `wiremock` expectations.
 
 ## Recent Changes
-- **Configuration Refinement**:
-    -   Exposed `wait_timeout` in `CrawlerRunConfig`.
-    -   Updated `WaitStrategy::NetworkIdle` to accept an optional `idle_time`.
-- **Retry Logic Enhancement**:
-    -   Added `retry_404` to `CrawlerRunConfig`.
-    -   Improved 404 detection and propagation.
-- **Performance Benchmarking**:
-    -   Benchmarked `JsonCssExtractionStrategy` vs `JsonXPathExtractionStrategy`.
-    -   **Result**: CSS extraction is ~2.65x faster than XPath extraction on large DOMs (3.5MB, 5000 items).
-    -   *Recommendation*: Prefer CSS selectors for performance-critical extraction where possible.
+- **Implemented `rig` Integration**:
+    -   Added `rig-core` to `Cargo.toml`.
+    -   Refactored `src/content_filter/llm.rs` to use `rig::providers::openai::Client` and `rig::agent::Agent`.
+    -   Ensured connection pooling/reuse by moving agent creation out of the parallel chunk processing loop.
+    -   Made `process_chunk` and `perform_completion_with_backoff` generic over `CompletionModel` to support future providers easily.
 
 ## Known Issues
+- **LLM Test Failures**: `tests/test_llm_filter.rs` fails because the `rig` OpenAI client appends `/chat/completions` (or similar) to the base URL, and `wiremock` is not matching the resulting path correctly against the mock. Debugging requires inspecting the exact URL `rig` generates.
 - **Headless 404 Handling**: In the current test environment (headless Chromium + wiremock), returning a 404 with an empty body causes `chromiumoxide` to fail navigation with `net::ERR_HTTP_RESPONSE_CODE_FAILURE`.
 
 ## Next Steps for the Agent (CRITICAL)
-1.  **Implement `rig` for LLM Support**:
-    -   The current `LLMContentFilter` is a basic placeholder. You must **implement `rig`** (likely the `rig-core` crate or similar Rust LLM framework) to properly architecture the LLM functionality.
-    -   **Support Multiple Providers**: The implementation must support multiple LLM providers (OpenAI, Anthropic, local models, etc.) via `rig`.
-    -   **Port Actual Functionality**: Start porting the robust LLM features from the original Python project.
-    -   *Note*: This is a heavy workload. Do not cut corners. The goal is a production-ready LLM integration.
+1.  **Fix LLM Integration Tests**:
+    -   Investigate the exact URL structure `rig` uses when a custom `base_url` is provided.
+    -   Update `tests/test_llm_filter.rs` to match this expectation so tests pass.
+    -   Consider enabling logging/tracing in tests to see the actual request URL.
 
-2.  **Headless Shell vs Full Chrome**:
+2.  **Expand LLM Provider Support**:
+    -   Currently, the code defaults to OpenAI and prints a warning for others.
+    -   Implement proper switching logic in `LLMContentFilter::filter_content` to support other providers supported by `rig` (e.g., Anthropic, Cohere) based on the `provider` string.
+
+3.  **Headless Shell vs Full Chrome**:
     -   Investigate if `chromiumoxide` can run with the lighter `headless_shell` binary.
 
-3.  **Error Handling Granularity**:
-    -   Investigate better ways to extract status codes from `chromiumoxide` errors when navigation fails completely.
-
-4. **Documentation**:
+4.  **Documentation**:
     -   Create extensive end user documentation for using the port.
 
 ## CLI Usage

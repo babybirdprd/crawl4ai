@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
-use reqwest::Client;
 use std::time::Duration;
 use futures::stream::{self, StreamExt};
-use serde_json::Value;
+use rig::{client::CompletionClient, completion::Prompt, providers};
 
 const PROMPT_FILTER_CONTENT: &str = r#"Your task is to filter and convert HTML content into clean, focused markdown that's optimized for use with LLMs and information retrieval systems.
 
@@ -72,8 +71,6 @@ pub struct LLMContentFilter {
 
 impl Default for LLMContentFilter {
     fn default() -> Self {
-        // Warning: This default configuration is invalid because api_token is empty
-        // It's provided to satisfy potential Default traits but should be instantiated with new()
         Self {
             config: LLMConfig {
                 provider: "openai/gpt-4o-mini".to_string(),
@@ -115,15 +112,42 @@ impl LLMContentFilter {
         // 1. Chunking
         let chunks = self.merge_chunks(html);
 
-        let client = Client::new();
+        // Determine provider and model
+        let (provider, model) = if let Some((p, m)) = self.config.provider.split_once('/') {
+            (p, m)
+        } else {
+             ("openai", self.config.provider.as_str())
+        };
+
+        if provider != "openai" {
+             eprintln!("Unsupported provider: {}. Falling back to OpenAI behavior.", provider);
+        }
+
+        // Initialize Client/Agent once
+        let mut client_builder = providers::openai::Client::builder()
+             .api_key(&self.config.api_token);
+
+        if let Some(ref base_url) = self.config.base_url {
+            client_builder = client_builder.base_url(base_url);
+        }
+
+        let client: rig::providers::openai::Client = match client_builder.build() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Failed to build LLM client: {}", e);
+                return String::new();
+            }
+        };
+
+        let agent = client.agent(model).build();
 
         // 2. Process chunks in parallel
         let tasks = chunks.into_iter().enumerate().map(|(i, chunk)| {
             let config = self.config.clone();
             let instruction = self.instruction.clone();
-            let client = client.clone();
+            let agent = agent.clone();
             async move {
-                Self::process_chunk(client, i, chunk, config, instruction).await
+                Self::process_chunk(i, chunk, config, instruction, agent).await
             }
         });
 
@@ -149,12 +173,10 @@ impl LLMContentFilter {
 
         let total_tokens_est = (words.len() as f32 * self.word_token_rate) as usize;
 
-        // If small enough, return as one chunk
         if total_tokens_est <= self.chunk_token_threshold {
             return vec![text.to_string()];
         }
 
-        // Calculate chunk size in words
         let chunk_size_words = (self.chunk_token_threshold as f32 / self.word_token_rate) as usize;
         let overlap_words = (chunk_size_words as f32 * self.overlap_rate) as usize;
 
@@ -176,25 +198,21 @@ impl LLMContentFilter {
         chunks
     }
 
-    async fn process_chunk(
-        client: Client,
+    async fn process_chunk<M: rig::completion::CompletionModel>(
         index: usize,
         chunk: String,
         config: LLMConfig,
         instruction: String,
+        agent: rig::agent::Agent<M>,
     ) -> (usize, String) {
-        // Sanitize chunk - basic json escape handled by serde_json
-        // We need to replace variables in prompt
+        // Prepare prompt
+        let mut prompt_text = PROMPT_FILTER_CONTENT.replace("{HTML}", &chunk);
+        prompt_text = prompt_text.replace("{REQUEST}", &instruction);
 
-        // Very basic sanitization of HTML for prompt injection protection could be done here
-        // But assuming the prompt handles it via block delimeters
+        let result = Self::perform_completion_with_backoff(&config, &prompt_text, agent).await;
 
-        let mut prompt = PROMPT_FILTER_CONTENT.replace("{HTML}", &chunk);
-        prompt = prompt.replace("{REQUEST}", &instruction);
-
-        match Self::perform_completion_with_backoff(client, &config, &prompt).await {
+        match result {
             Ok(content) => {
-                // Extract content from <content> tags
                 if let Some(start) = content.find("<content>") {
                     if let Some(end) = content.find("</content>") {
                         if start < end {
@@ -203,7 +221,6 @@ impl LLMContentFilter {
                         }
                     }
                 }
-                // Fallback: return full content if tags not found (or maybe LLM forgot tags)
                 (index, content)
             },
             Err(e) => {
@@ -213,60 +230,33 @@ impl LLMContentFilter {
         }
     }
 
-    async fn perform_completion_with_backoff(client: Client, config: &LLMConfig, prompt: &str) -> Result<String, String> {
+    async fn perform_completion_with_backoff<M: rig::completion::CompletionModel>(
+        config: &LLMConfig,
+        prompt_text: &str,
+        agent: rig::agent::Agent<M>
+    ) -> Result<String, String> {
         let mut attempt = 0;
-
-        // Basic OpenAI compatible request body
-        let body_json = serde_json::json!({
-            "model": config.provider,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.1
-        });
-
-        // If provider looks like "openai/...", strip the prefix for the model field if using standard base_url
-        // Actually, usually users provide "gpt-4" etc.
-        // If they use litellm style "openai/gpt-4", we might need to handle it.
-        // For this implementation, we pass provider as is to model field.
-
-        // Adjust for generic use
-        let url = config.base_url.as_deref().unwrap_or("https://api.openai.com/v1/chat/completions");
 
         loop {
             attempt += 1;
 
-            let res = client.post(url)
-                .header("Authorization", format!("Bearer {}", config.api_token))
-                .header("Content-Type", "application/json")
-                .json(&body_json)
-                .send()
-                .await;
+            let res = agent.prompt(prompt_text).await;
 
             match res {
                 Ok(response) => {
-                    if response.status().is_success() {
-                        let json: Value = response.json().await.map_err(|e| e.to_string())?;
-                        // Extract content
-                        // Standard OpenAI response: choices[0].message.content
-                        if let Some(content) = json.pointer("/choices/0/message/content") {
-                             return Ok(content.as_str().unwrap_or("").to_string());
-                        } else {
-                            return Err("Invalid response format".to_string());
-                        }
-                    } else if response.status().as_u16() == 429 {
-                        // Rate limit
+                    return Ok(response);
+                },
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    if err_msg.contains("429") || err_msg.contains("Too Many Requests") {
                          if attempt >= config.backoff_max_attempts {
                             return Err(format!("Rate limit exceeded after {} attempts", attempt));
                         }
                         let delay = config.backoff_base_delay as f64 * config.backoff_exponential_factor.powi(attempt as i32 - 1);
                         tokio::time::sleep(Duration::from_secs_f64(delay)).await;
                         continue;
-                    } else {
-                        return Err(format!("API error: {}", response.status()));
                     }
-                },
-                Err(e) => {
+
                     if attempt >= config.backoff_max_attempts {
                         return Err(format!("Request failed: {}", e));
                     }
